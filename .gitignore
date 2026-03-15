@@ -1,0 +1,118 @@
+# =========================
+
+# Build directories
+
+# =========================
+
+build/
+Build/
+cmake-build*/
+out/
+
+# =========================
+
+# Compiled binaries
+
+# =========================
+
+*.o
+*.obj
+*.so
+*.a
+*.dll
+*.exe
+*.out
+*.app
+*.dylib
+
+# Executables generated during development
+
+gasoline
+gasoline.exe
+
+# =========================
+
+# CMake files
+
+# =========================
+
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# =========================
+
+# Logs
+
+# =========================
+
+*.log
+
+# =========================
+
+# OS generated files
+
+# =========================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+
+# Editor / IDE files
+
+# =========================
+
+# VSCode
+
+.vscode/
+
+# JetBrains (CLion, Android Studio, IntelliJ)
+
+.idea/
+
+# Vim
+
+*.swp
+*.swo
+
+# =========================
+
+# Android build outputs (future)
+
+# =========================
+
+android/.gradle/
+android/build/
+android/app/build/
+
+# Gradle cache
+
+.gradle/
+
+# Local Android config
+
+local.properties
+
+# =========================
+
+# Temporary files
+
+# =========================
+
+*.tmp
+*.cache
+*.bak
+
+# =========================
+
+# Coverage / profiling
+
+# =========================
+
+*.gcno
+*.gcda
+*.gcov

@@ -68,6 +68,7 @@ Gasoline devices communicate over the local network using a persistent connectio
 Communication uses structured packets encoded in JSON.
 Each device runs a Gasoline daemon which listens for incoming connections.
 Devices connect to each other and exchange packets describing events or commands.
+Port to be used: 42666
 Example packet structure:
 ```json
 {
