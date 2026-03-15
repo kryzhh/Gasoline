@@ -197,8 +197,8 @@ gasoline/
 ---
 
 ## Phases:
-Milestone 1: daemon + TCP server
-Milestone 2: device discovery
-Milestone 3: pairing
-Milestone 4: notifications
-Milestone 5: file transfer
+- Milestone 1: daemon + TCP server
+- Milestone 2: device discovery
+- Milestone 3: pairing
+- Milestone 4: notifications
+- Milestone 5: file transfer
