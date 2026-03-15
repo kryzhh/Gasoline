@@ -20,10 +20,7 @@ The protocol is designed to be:
 # Transport Layer
 Gasoline uses persistent TCP connections between devices.
 Each device runs a Gasoline daemon that listens on a predefined port.
-Example port:
-```
-42666
-```
+Port: 42666
 When a device connects, both sides exchange protocol messages using JSON packets.
 
 ---
@@ -34,10 +31,12 @@ Each packet follows the same top-level structure.
 Example packet:
 ```json
 {
-  "type": "notification",
+  "type": "hello",
   "device_id": "phone_01",
-  "timestamp": 1710000000,
-  "payload": {}
+  "payload": {
+    "device_name": "Krish Phone",
+    "device_type": "android"
+  }
 }
 ```
 
@@ -45,65 +44,39 @@ Example packet:
 
 ### type
 Defines the type of packet being transmitted.
-Example:
-```
-notification
-file_offer
-pair_request
-```
+Currently implemented: "hello"
 
 ### device_id
 A unique identifier assigned to each device.
-Example:
-
-```
-phone_01
-laptop_linux
-desktop_windows
-```
-
-### timestamp
-Unix timestamp indicating when the packet was generated.
+Example: "phone_01", "laptop_linux"
 
 ### payload
 Packet-specific data associated with the message type.
+Optional field.
 
 ---
 
 # Device Identification
 Each Gasoline device has a unique device identifier.
-Example device object:
-
-```json
-{
-  "device_id": "phone_01",
-  "device_name": "Krish Phone",
-  "device_type": "android"
-}
-```
-
-Possible device types include:
-```
-android
-linux
-windows
-```
-Devices store trusted devices locally after pairing.
+Device information includes:
+- device_id: Unique string identifier
+- device_name: Human-readable name
+- device_type: Platform type ("android", "linux", "windows")
 
 ---
 
 # Connection Lifecycle
-When two devices connect, they follow this sequence.
+When two devices connect, they follow this sequence:
 ```
 Connection established
         ↓
 hello packet exchange
         ↓
-pairing validation
+device registration
         ↓
-normal packet communication
+connection maintained
 ```
-If a device is not trusted, pairing must occur before normal communication.
+Currently, only the hello packet is processed, registering the device in the system.
 
 ---
 
@@ -113,7 +86,7 @@ If a device is not trusted, pairing must occur before normal communication.
 Sent immediately after a connection is established.
 Purpose:
 * identify device
-* exchange device metadata
+* register device in the system
 Example:
 ```json
 {
@@ -128,7 +101,7 @@ Example:
 
 ---
 
-# Pairing Packets
+# Planned Packet Types
 
 ## pair_request
 Sent by a device attempting to pair with another device.
@@ -151,15 +124,9 @@ Sent when the user accepts the pairing request.
  "payload": {}
 }
 ```
-Once pairing is accepted, both devices store each other as trusted.
-
----
-
-# Notification Packets
 
 ## notification
 Used by the Android client to mirror notifications.
-Example:
 ```json
 {
  "type": "notification",
@@ -171,15 +138,9 @@ Example:
  }
 }
 ```
-Desktop systems display the notification through native notification systems.
-
----
-
-# Notification Reply
 
 ## notification_reply
 Used by desktop devices to send a reply to a notification.
-Example:
 ```json
 {
  "type": "notification_reply",
@@ -190,13 +151,6 @@ Example:
  }
 }
 ```
-The Android client executes the reply using the Android notification API.
-
----
-
-# File Transfer Protocol
-File transfer is permission-based.
-The sending device must first request permission.
 
 ## file_offer
 Sent when a device wants to send a file.
@@ -210,9 +164,6 @@ Sent when a device wants to send a file.
  }
 }
 ```
-The receiving device presents the user with an accept or reject prompt.
-
----
 
 ## file_accept
 Sent when the receiving device accepts the file transfer.
@@ -226,8 +177,6 @@ Sent when the receiving device accepts the file transfer.
 }
 ```
 
----
-
 ## file_reject
 Sent when the receiving device rejects the transfer.
 ```json
@@ -240,12 +189,8 @@ Sent when the receiving device rejects the transfer.
 }
 ```
 
----
-
-# Keepalive Packets
-To maintain persistent connections, devices periodically exchange keepalive messages.
-
 ## ping
+Keepalive message.
 ```json
 {
  "type": "ping",
@@ -255,6 +200,7 @@ To maintain persistent connections, devices periodically exchange keepalive mess
 ```
 
 ## pong
+Keepalive response.
 ```json
 {
  "type": "pong",
@@ -265,8 +211,8 @@ To maintain persistent connections, devices periodically exchange keepalive mess
 
 ---
 
-# Security Model
-Gasoline uses a trust-based pairing model.
+# Security Model (Planned)
+Gasoline will use a trust-based pairing model.
 Unpaired devices cannot exchange normal packets.
 During pairing:
 * user confirmation is required
@@ -275,7 +221,7 @@ Trusted devices are stored locally.
 
 ---
 
-# Protocol Versioning
+# Protocol Versioning (Planned)
 Future protocol changes may introduce versioning.
 Example:
 ```json

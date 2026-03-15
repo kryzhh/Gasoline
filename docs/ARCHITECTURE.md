@@ -13,11 +13,11 @@ The system allows devices to exchange information such as notifications, files, 
 
 # System Components
 Gasoline consists of three major components:
-1. Android Client 
+1. Android Client (Planned)
 2. Gasoline Core
-3. Platform Integration Layer
+3. Platform Integration Layer (Planned)
 
-## Android Client
+## Android Client (Planned)
 The Android application is responsible for collecting system events and forwarding them to connected devices.
 Responsibilities include:
 * Monitoring device notifications
@@ -33,23 +33,28 @@ The Android client communicates with the Gasoline daemon using the Gasoline prot
 ## Gasoline Core
 Gasoline Core contains the cross-platform logic used by all desktop implementations.
 This includes:
-* Network communication
-* Packet serialization and parsing
-* Device management
-* Pairing and authentication
-* File transfer logic
-* Event routing
+* Network communication (TCP server and client handling)
+* Packet serialization and parsing (JSON-based)
+* Device management and registry
+* Packet routing
+* Logging utilities
 Gasoline Core is designed to be completely platform independent and must not depend on operating system specific APIs. 
 All platform functionality is handled through the Platform Integration Layer.
 
+### Core Modules
+- **Networking**: Server listens on port 42666, handles incoming connections with multithreaded client handlers.
+- **Protocol**: Packet parsing from JSON strings, basic routing system.
+- **Device**: Registry for managing connected devices with thread-safe operations.
+- **Utils**: Logging functions for info and error messages.
+
 ---
 
-## Platform Integration Layer
+## Platform Integration Layer (Planned)
 The platform layer connects the Gasoline Core with operating system features.
 Separate adapters are implemented for each supported platform.
 
-### Linux Integration
-The Linux adapter provides:
+### Linux Integration (Planned)
+The Linux adapter will provide:
 * Desktop notifications via `libnotify`
 * File system integration
 * File transfer UI
@@ -64,37 +69,37 @@ The Windows adapter will provide:
 ---
 
 # Communication Model
-Gasoline devices communicate over the local network using a persistent connection.
+Gasoline devices communicate over the local network using persistent TCP connections.
 Communication uses structured packets encoded in JSON.
-Each device runs a Gasoline daemon which listens for incoming connections.
+Each device runs a Gasoline daemon which listens for incoming connections on port 42666.
 Devices connect to each other and exchange packets describing events or commands.
-Port to be used: 42666
-Example packet structure:
+
+Packet structure:
 ```json
 {
-  "type": "notification",
+  "type": "hello",
   "device_id": "phone_01",
-  "timestamp": 1710000000,
-  "payload": {}
+  "payload": {
+    "device_name": "Krish Phone",
+    "device_type": "android"
+  }
 }
 ```
 
-Packet types include:
-* device discovery
-* pairing requests
-* notifications
-* notification replies
-* file transfer offers
-* file transfer control
-* keepalive messages
+Currently implemented packet types:
+* hello (device identification and registration)
 
 ---
 
-# Device Discovery
-Gasoline uses local network discovery to automatically locate nearby devices.
-Devices advertise themselves using a discovery service so other Gasoline devices on the same network can detect them.
-Discovery allows users to connect devices without manually entering IP addresses.
-Once discovered, devices can initiate the pairing process.
+# Device Management
+Devices are managed through a centralized registry that tracks connected devices.
+Each device is identified by:
+- device_id: Unique identifier
+- device_name: Human-readable name
+- device_type: Platform type (android, linux, windows)
+- socket_fd: Internal socket file descriptor
+
+The registry provides thread-safe add/remove/list operations for device management.
 
 ---
 
