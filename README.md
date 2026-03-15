@@ -12,6 +12,8 @@ Features
 
 Project Status: Early development
 
-
+## Documentation:
+- Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Protocols: [protocol_docs/PROTOCOL.md](protocol_docs/PROTOCOL.md)
 
 _"Just pour up the gasolineeee. It don't mean much to mee"_
