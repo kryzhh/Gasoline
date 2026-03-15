@@ -10,8 +10,7 @@ Features
 - file transfer
 - multi-device support
 
-Project Status
-Early development
+Project Status: Early development
 
 
 
