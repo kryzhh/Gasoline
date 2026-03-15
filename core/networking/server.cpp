@@ -8,12 +8,16 @@
 #include "../utils/logger.hpp"
 #include "../protocol/packet.hpp"
 #include "../../include/gasoline/config.hpp"
+#include "client_handler.hpp"
 
 // Server exclusive stuff
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
+
+// Multithreading
+#include <thread> 
 
 namespace gasoline {
 
@@ -35,24 +39,18 @@ void Server::start() { // Start function declaration
     log("Listening on port " + std::to_string(SERVER_PORT));
 
     while (true) {
-
-        client_socket = accept(server_fd,
-                               (struct sockaddr*)&address,
-                               (socklen_t*)&addrlen);
-
+        int client_socket = accept(server_fd,
+                                (struct sockaddr*)&address,
+                                (socklen_t*)&addrlen);
         log("Device connected");
 
-        char buffer[BUFFER_SIZE] = {0}; // Empty buffer initialized
+        std::thread client_thread([client_socket]() { // New thread for each device connected
+            gasoline::ClientHandler handler(client_socket);
+            handler.handle();
 
-        int bytes = recv(client_socket, buffer, BUFFER_SIZE, 0); // Read data from client socket
+        });
 
-        if (bytes > 0) {
-            std::string data(buffer);
-            Packet pkt = parse_packet(data); // Parse data received
-            log("Packet received: " + pkt.type); // Logs kind of data received
-        }
-
-        close(client_socket); // Closes connection once data received
+        client_thread.detach();
     }
 }
 

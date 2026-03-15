@@ -1,23 +1,19 @@
 #include "packet.hpp"
+using json = nlohmann::json;
 
 // Function declartion for packet parsing
 
 namespace gasoline {
 
 Packet parse_packet(const std::string& data) {
+    json j = json::parse(data); // Parse the JSON received
+    Packet pkt; // Create the packet
+    // And add the values
 
-    Packet pkt;
-    pkt.raw = data;
-
-    // Validation of packet received, it should fall withing given categories, for now only 2 categories
-    // ping and notification, will add more rn just setting up basic daemon.
-
-    if (data.find("\"type\":\"ping\"") != std::string::npos)
-        pkt.type = "ping";
-    else if (data.find("\"type\":\"notification\"") != std::string::npos)
-        pkt.type = "notification";
-    else
-        pkt.type = "unknown";
+    pkt.type = j["type"];
+    pkt.device_id = j["device_id"];
+    if (j.contains("payload"))
+        pkt.payload = j["payload"];
 
     return pkt;
 }

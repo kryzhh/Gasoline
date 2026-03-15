@@ -1,13 +1,18 @@
 #pragma once
 #include <string>
+#include <nlohmann/json.hpp>
 
 // Defining packet structure
 
 namespace gasoline {
 
 struct Packet {
-    std::string type; // Tells what kind of packet is coming, for eg: ping, pong, notification etc
-    std::string raw; // The entire message (in JSON but as string, no parsing yet)
+
+    std::string type;
+    std::string device_id;
+
+    nlohmann::json payload; // Using actual json parser now
+
 };
 
 Packet parse_packet(const std::string& data);
