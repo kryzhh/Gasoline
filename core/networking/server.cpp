@@ -28,6 +28,10 @@ void Server::start() { // Start function declaration
     int addrlen = sizeof(address); 
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0); // Creates a new socket.
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)); // Failsafe to ensure server is restarted instantly
+    // If this not added, OS would keep the port occupied for a cooldown period, which will give issues if server is to be restarted
+    // After some update or daemon restarts
 
     address.sin_family = AF_INET; // Tells we are using IPv4
     address.sin_addr.s_addr = INADDR_ANY; // Accept connection from all interfaces

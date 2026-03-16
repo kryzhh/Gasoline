@@ -16,6 +16,7 @@ public:
 
 private:
     static void handle_hello(const Packet& pkt, int socket_fd);
+    static void handle_ping(const Packet& pkt, int socket_fd);
 
 };
 
