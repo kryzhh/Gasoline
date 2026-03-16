@@ -15,7 +15,7 @@ The system allows devices to exchange information such as notifications, files, 
 Gasoline consists of three major components:
 1. Android Client (Planned)
 2. Gasoline Core
-3. Platform Integration Layer (Planned)
+3. Platform Integration Layer
 
 ## Android Client (Planned)
 The Android application is responsible for collecting system events and forwarding them to connected devices.
@@ -36,34 +36,34 @@ This includes:
 * Network communication (TCP server and client handling)
 * Packet serialization and parsing (JSON-based)
 * Device management and registry
-* Packet routing
+* Packet routing with handler classes
+* Packet monitoring and logging
 * Logging utilities
 Gasoline Core is designed to be completely platform independent and must not depend on operating system specific APIs. 
 All platform functionality is handled through the Platform Integration Layer.
 
 ### Core Modules
-- **Networking**: Server listens on port 42666, handles incoming connections with multithreaded client handlers.
-- **Protocol**: Packet parsing from JSON strings, basic routing system.
+- **Networking**: Server listens on port 42666, handles incoming connections with multithreaded client handlers, sends packets with framing.
+- **Protocol**: Packet parsing from JSON strings, routing system with dedicated handlers for each packet type.
 - **Device**: Registry for managing connected devices with thread-safe operations.
-- **Utils**: Logging functions for info and error messages.
+- **Utils**: Logging functions for info/error messages, packet monitoring for RX/TX logging.
 
 ---
 
-## Platform Integration Layer (Planned)
+## Platform Integration Layer
 The platform layer connects the Gasoline Core with operating system features.
 Separate adapters are implemented for each supported platform.
 
-### Linux Integration (Planned)
-The Linux adapter will provide:
-* Desktop notifications via `libnotify`
-* File system integration
-* File transfer UI
-* Interaction with desktop environments
+### Linux Integration
+The Linux adapter provides:
+* Device discovery using mDNS (Avahi)
+* Service advertisement on local network
+* Automatic device detection
 
 ### Windows Integration (Planned)
 The Windows adapter will provide:
-* Toast notifications
-* File system integration
+* Device discovery (TBD)
+* Service advertisement
 * Windows-specific system hooks
 
 ---
@@ -88,6 +88,18 @@ Packet structure:
 
 Currently implemented packet types:
 * hello (device identification and registration)
+* ping (keepalive)
+* pong (keepalive response)
+
+---
+
+# Device Discovery
+Gasoline uses mDNS (multicast DNS) for automatic device discovery on the local network.
+Devices advertise themselves using the service name "_gasoline._tcp" on port 42666.
+The discovery service allows devices to automatically find and connect to Gasoline daemons without manual IP configuration.
+
+### Linux Implementation
+Uses Avahi library for mDNS service advertisement and discovery.
 
 ---
 

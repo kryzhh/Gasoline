@@ -44,7 +44,7 @@ Example packet:
 
 ### type
 Defines the type of packet being transmitted.
-Currently implemented: "hello"
+Currently implemented: "hello", "ping", "pong"
 
 ### device_id
 A unique identifier assigned to each device.
@@ -68,15 +68,19 @@ Device information includes:
 # Connection Lifecycle
 When two devices connect, they follow this sequence:
 ```
+Device discovery (mDNS)
+        ↓
 Connection established
         ↓
 hello packet exchange
         ↓
 device registration
         ↓
-connection maintained
+normal packet communication
+        ↓
+keepalive (ping/pong)
 ```
-Currently, only the hello packet is processed, registering the device in the system.
+Devices are discovered using mDNS service advertisement. Once discovered, devices establish TCP connections and exchange hello packets for registration. Keepalive is maintained through periodic ping/pong exchanges.
 
 ---
 
@@ -96,6 +100,26 @@ Example:
    "device_name": "Krish Phone",
    "device_type": "android"
  }
+}
+```
+
+## ping
+Keepalive message sent to check connection status.
+```json
+{
+ "type": "ping",
+ "device_id": "phone_01",
+ "payload": {}
+}
+```
+
+## pong
+Response to ping, confirms connection is active.
+```json
+{
+ "type": "pong",
+ "device_id": "laptop_linux",
+ "payload": {}
 }
 ```
 
@@ -186,26 +210,6 @@ Sent when the receiving device rejects the transfer.
  "payload": {
    "file_name": "photo.jpg"
  }
-}
-```
-
-## ping
-Keepalive message.
-```json
-{
- "type": "ping",
- "device_id": "phone_01",
- "payload": {}
-}
-```
-
-## pong
-Keepalive response.
-```json
-{
- "type": "pong",
- "device_id": "laptop_linux",
- "payload": {}
 }
 ```
 
