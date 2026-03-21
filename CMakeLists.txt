@@ -17,6 +17,7 @@ add_executable(gasoline
     core/networking/server.cpp
     core/networking/client_handler.cpp
     core/networking/send_packet.cpp
+    core/networking/connect.cpp
 
     # Protocol
     core/protocol/packet.cpp
@@ -30,6 +31,7 @@ add_executable(gasoline
     # Utils
     core/utils/logger.cpp
     core/utils/packet_monitor.cpp
+    core/utils/device_id.cpp
 
     # Discovery (IMPORTANT)
     core/discovery/discovery_client.cpp

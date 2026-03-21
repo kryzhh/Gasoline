@@ -18,6 +18,7 @@ public:
     void add_device(const Device& device);
     void remove_device(int socket_fd);
     void list_devices();
+    bool is_already_connected(std::string device_id);
 
 private:
 

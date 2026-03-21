@@ -17,4 +17,6 @@ struct Packet {
 
 Packet parse_packet(const std::string& data);
 
+std::string serialize_packet(const Packet& pkt);
+
 }

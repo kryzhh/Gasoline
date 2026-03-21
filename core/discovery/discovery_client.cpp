@@ -1,5 +1,11 @@
 #include "discovery_client.hpp"
 #include "../utils/logger.hpp"
+#include "../networking/connect.hpp"
+
+#include <set>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 extern "C" {
 #include <avahi-client/client.h>
@@ -10,9 +16,37 @@ extern "C" {
 
 namespace gasoline {
 
-static AvahiSimplePoll* simple_poll = nullptr;
+static AvahiSimplePoll* simple_poll = nullptr; // Avahi Poll
+static std::set<std::string> discovered_ips; // IPs discovered
+static std::set<std::string> connected_ips; // IPs already connected to
 
-// Resolve Callback
+// Gets local IP
+std::string get_local_ip() {
+    struct ifaddrs *ifaddr, *ifa;
+
+    if (getifaddrs(&ifaddr) == -1) {
+        return "";
+    }
+
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in* sa = (struct sockaddr_in*)ifa->ifa_addr;
+            std::string ip = inet_ntoa(sa->sin_addr);
+
+            // Skip loopback
+            if (ip != "127.0.0.1") {
+                freeifaddrs(ifaddr);
+                return ip;
+            }
+        }
+    }
+
+    freeifaddrs(ifaddr);
+    return "";
+}
+
 static void resolve_callback(
     AvahiServiceResolver* r,
     AvahiIfIndex interface,
@@ -34,19 +68,52 @@ static void resolve_callback(
         char addr[AVAHI_ADDRESS_STR_MAX];
         avahi_address_snprint(addr, sizeof(addr), address);
 
-
         std::string ip = addr;
 
-        // Skip unwanted addresses
-        if (ip == "127.0.0.1" || 
-            ip.rfind("172.", 0) == 0 || 
-            ip.rfind("fe80", 0) == 0) {
+        // Skip IPv6
+        if (ip.find(":") != std::string::npos) {
             return;
         }
+
+        // Skip loopback
+        if (ip == "127.0.0.1") {
+            return;
+        }
+
+        std::string local_ip = get_local_ip();
+        std::string subnet = local_ip.substr(0, local_ip.find_last_of('.') + 1);
+
+        // ONLY allow same subnet
+        if (!(ip.rfind(subnet, 0) == 0)) {
+            return;
+        }
+
+        // Avoid duplicate discovery
+        if (discovered_ips.count(ip)) {
+            return;
+        }
+        discovered_ips.insert(ip);
+
+        // std::string local_ip = get_local_ip();
+        // if (ip == local_ip) {
+        //     log("Skipping self connection");
+        //     return;
+        // }
+
+        // Avoid duplicate connections
+        if (connected_ips.count(ip)) {
+            log("Already connected, skipping");
+            return;
+        }
+        connected_ips.insert(ip);
+
         // Log it
         log(std::string("Name: ") + name);
         log(std::string("IP: ") + addr);
         log(std::string("Port: ") + std::to_string(port));
+
+        log("Attempting connection to: " + ip);
+        connect_to_device(ip, port);
 
     } else {
         log("Failed to resolve service");

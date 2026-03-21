@@ -18,4 +18,15 @@ Packet parse_packet(const std::string& data) {
     return pkt;
 }
 
+std::string serialize_packet(const Packet& pkt) {
+
+    json j;
+
+    j["type"] = pkt.type;
+    j["device_id"] = pkt.device_id;
+    j["payload"] = pkt.payload;
+
+    return j.dump() + "\n";
+}
+
 }

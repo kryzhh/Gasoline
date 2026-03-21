@@ -17,11 +17,16 @@ ClientHandler::ClientHandler(int socket_fd) {
     this->socket_fd = socket_fd; // Stores the socket inside the object
 }
 
-void ClientHandler::handle() { // To create instances (devices), since program multithreaded, each handle called is a new device.
+// To create instances (devices), since program multithreaded, each handle called is a new device.
+void ClientHandler::handle() {
+
     char buffer[BUFFER_SIZE];
+    std::string incoming_buffer; // ✅ MOVED OUTSIDE LOOP
+
+    log("Handler started for socket: " + std::to_string(socket_fd));
+
     while (true) {
         int bytes = recv(socket_fd, buffer, BUFFER_SIZE, 0);
-        std::string incoming_buffer;
 
         if (bytes == 0) {
             log("Client disconnected normally");
@@ -34,10 +39,13 @@ void ClientHandler::handle() { // To create instances (devices), since program m
         }
 
         incoming_buffer.append(buffer, bytes);
+
         size_t pos;
         while ((pos = incoming_buffer.find('\n')) != std::string::npos) { // Building a packet framing system, as we can have situations where we can have packets in fragment. We use \n to end current packet
+
             std::string packet_str = incoming_buffer.substr(0, pos);
             incoming_buffer.erase(0, pos + 1);
+
             try {
                 Packet pkt = parse_packet(packet_str);
                 log("Packet received: " + pkt.type);
