@@ -10,6 +10,7 @@
 // Handlers
 #include "../handlers/hello_handler.hpp"
 #include "../handlers/ping_handler.hpp"
+#include "../handlers/message_handler.hpp"
 
 namespace gasoline {
 
@@ -21,6 +22,10 @@ void PacketRouter::route(const Packet& pkt, int socket_fd) {
     }
     if (pkt.type == "ping") {
         PingHandler::handle(pkt, socket_fd);
+        return;
+    }
+    if (pkt.type == "message") {
+        MessageHandler::handle(pkt, socket_fd);
         return;
     }
     else log("Unknown packet type: " + pkt.type);

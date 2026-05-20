@@ -33,6 +33,7 @@ void HelloHandler::handle(const Packet& pkt, int socket_fd) {
     device.socket_fd = socket_fd;
     device.is_connected = true;
 
+    device.ready = true;
     device_registry.add_device(device);
 
     log("Device registered: " + device.device_id);

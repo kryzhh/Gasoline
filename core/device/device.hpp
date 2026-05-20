@@ -12,6 +12,7 @@ struct Device {
     
     bool is_connected = false;
     int socket_fd;
+    bool ready = false;
 
 };
 

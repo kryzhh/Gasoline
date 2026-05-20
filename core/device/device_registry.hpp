@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <mutex> // Using mutexes to ensure no race conditions since server is multithreaded
+#include <nlohmann/json.hpp>
+
 #include "device.hpp"
 
 namespace gasoline {
@@ -19,6 +21,9 @@ public:
     void remove_device(int socket_fd);
     void list_devices();
     bool is_already_connected(std::string device_id);
+    void send_to_device(const std::string& device_id, const nlohmann::json& packet);
+    void broadcast(const nlohmann::json& packet);
+    const std::vector<Device>& get_devices() const;
 
 private:
 

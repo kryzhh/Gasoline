@@ -24,6 +24,7 @@ add_executable(gasoline
     core/protocol/router/packet_router.cpp
     core/protocol/handlers/hello_handler.cpp
     core/protocol/handlers/ping_handler.cpp
+    core/protocol/handlers/message_handler.cpp
 
     # Device
     core/device/device_registry.cpp
@@ -33,7 +34,7 @@ add_executable(gasoline
     core/utils/packet_monitor.cpp
     core/utils/device_id.cpp
 
-    # Discovery (IMPORTANT)
+    # Discovery
     core/discovery/discovery_client.cpp
     platform/linux/discovery/discovery_service.cpp
 )

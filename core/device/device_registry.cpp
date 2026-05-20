@@ -1,5 +1,9 @@
 #include "device_registry.hpp"
 #include "../utils/logger.hpp"
+#include "../protocol/packet.hpp"
+#include "../networking/send_packet.hpp"
+#include "../utils/device_id.hpp"
+
 #include <algorithm>
 
 namespace gasoline {
@@ -36,6 +40,35 @@ void DeviceRegistry::list_devices() { // Lists currently connected devices
             " (" + device.device_type + ")" +
             " [socket " + std::to_string(device.socket_fd) + "]");
     }
+}
+
+void DeviceRegistry::send_to_device(const std::string& device_id, const nlohmann::json& packet) {
+    for (auto& device : devices) {
+        if (device.device_id == device_id) {
+            send_packet(device.socket_fd, packet);
+            return;
+        }
+    }
+    log("Device not found: " + device_id);
+}
+
+void DeviceRegistry::broadcast(const nlohmann::json& packet) {
+    for (auto& device : devices) {
+        if (device.socket_fd <= 0)
+            continue;
+        if (!device.ready)
+            continue;
+        if (device.device_id == get_my_device_id())
+            continue;
+        log("Sending to READY device: " + device.device_id);
+
+        send_packet(device.socket_fd, packet);
+    }
+}
+
+
+const std::vector<Device>& DeviceRegistry::get_devices() const {
+    return devices;
 }
 
 }
