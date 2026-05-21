@@ -2,7 +2,6 @@
 
 #include <vector>
 #include <mutex> // Using mutexes to ensure no race conditions since server is multithreaded
-#include <nlohmann/json.hpp>
 
 #include "device.hpp"
 
@@ -19,11 +18,10 @@ public:
 
     void add_device(const Device& device);
     void remove_device(int socket_fd);
+    void set_state_for_socket(int socket_fd, DeviceState state);
     void list_devices();
     bool is_already_connected(std::string device_id);
-    void send_to_device(const std::string& device_id, const nlohmann::json& packet);
-    void broadcast(const nlohmann::json& packet);
-    const std::vector<Device>& get_devices() const;
+    std::vector<Device> get_devices_copy();
 
 private:
 

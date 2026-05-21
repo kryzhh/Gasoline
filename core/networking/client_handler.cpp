@@ -39,6 +39,7 @@ void ClientHandler::handle() {
         }
 
         incoming_buffer.append(buffer, bytes);
+        log("RAW: " + incoming_buffer);
 
         size_t pos;
         while ((pos = incoming_buffer.find('\n')) != std::string::npos) { // Building a packet framing system, as we can have situations where we can have packets in fragment. We use \n to end current packet
@@ -57,6 +58,7 @@ void ClientHandler::handle() {
         }
     }
 
+    device_registry.set_state_for_socket(socket_fd, DeviceState::DISCONNECTED);
     device_registry.remove_device(socket_fd);
     close(socket_fd);
     log("Device disconnected");

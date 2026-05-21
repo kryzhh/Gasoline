@@ -1,8 +1,5 @@
 #include "device_registry.hpp"
 #include "../utils/logger.hpp"
-#include "../protocol/packet.hpp"
-#include "../networking/send_packet.hpp"
-#include "../utils/device_id.hpp"
 
 #include <algorithm>
 
@@ -12,9 +9,18 @@ DeviceRegistry device_registry;
 
 void DeviceRegistry::add_device(const Device& device) { // Adds device to the registry based on the socket it is connected to
     std::lock_guard<std::mutex> lock(registry_mutex); // Ensure simultaenous access of registry (vector containing devices) happens in a safe manner 
+    devices.erase( // Ensuring no redundancy
+        std::remove_if(devices.begin(), devices.end(),
+            [&](const Device& d) {
+                return d.device_id == device.device_id;
+            }),
+        devices.end()
+    );
     devices.push_back(device);
     log("Device registered: " + device.device_name);
 }
+
+
 
 void DeviceRegistry::remove_device(int socket_fd) { // Removes device from the registry based on socket it is connected to
     std::lock_guard<std::mutex> lock(registry_mutex);
@@ -26,6 +32,16 @@ void DeviceRegistry::remove_device(int socket_fd) { // Removes device from the r
         devices.end()
     );
     log("Device removed from registry");
+}
+
+void DeviceRegistry::set_state_for_socket(int socket_fd, DeviceState state) {
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    for (auto& device : devices) {
+        if (device.socket_fd == socket_fd) {
+            device.state = state;
+            return;
+        }
+    }
 }
 
 void DeviceRegistry::list_devices() { // Lists currently connected devices
@@ -42,32 +58,8 @@ void DeviceRegistry::list_devices() { // Lists currently connected devices
     }
 }
 
-void DeviceRegistry::send_to_device(const std::string& device_id, const nlohmann::json& packet) {
-    for (auto& device : devices) {
-        if (device.device_id == device_id) {
-            send_packet(device.socket_fd, packet);
-            return;
-        }
-    }
-    log("Device not found: " + device_id);
-}
-
-void DeviceRegistry::broadcast(const nlohmann::json& packet) {
-    for (auto& device : devices) {
-        if (device.socket_fd <= 0)
-            continue;
-        if (!device.ready)
-            continue;
-        if (device.device_id == get_my_device_id())
-            continue;
-        log("Sending to READY device: " + device.device_id);
-
-        send_packet(device.socket_fd, packet);
-    }
-}
-
-
-const std::vector<Device>& DeviceRegistry::get_devices() const {
+std::vector<Device> DeviceRegistry::get_devices_copy() {
+    std::lock_guard<std::mutex> lock(registry_mutex);
     return devices;
 }
 

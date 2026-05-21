@@ -34,9 +34,18 @@ add_executable(gasoline
     core/utils/packet_monitor.cpp
     core/utils/device_id.cpp
 
+    # Events
+    core/events/event_bus.cpp
+
     # Discovery
     core/discovery/discovery_client.cpp
     platform/linux/discovery/discovery_service.cpp
+
+    # Services
+    services/message_service.cpp
+
+    # Interface
+    interface/api_server.cpp
 )
 
 # Link Avahi (Linux discovery)

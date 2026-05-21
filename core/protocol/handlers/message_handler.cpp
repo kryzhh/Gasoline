@@ -1,4 +1,5 @@
 #include "message_handler.hpp"
+#include "../../events/event_bus.hpp"
 #include "../../utils/logger.hpp"
 
 namespace gasoline {
@@ -12,7 +13,7 @@ void MessageHandler::handle(const Packet& pkt, int socket_fd) {
 
     std::string msg = pkt.payload["text"];
 
-    log("[MESSAGE] " + msg);
+    EventBus::emit_message(pkt.device_id, msg);
 }
 
 }

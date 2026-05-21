@@ -5,8 +5,9 @@
 #include "../core/utils/device_id.hpp"
 #include "../core/device/device_registry.hpp"
 #include "../core/utils/logger.hpp"
+#include "../services/message_service.hpp"
+#include "../interface/api_server.hpp"
 
-#include <nlohmann/json.hpp>
 #include <signal.h>
 #include <thread>
 #include <chrono>
@@ -33,10 +34,10 @@ int main() {
     // Thread 3: Send test message AFTER connection
     std::thread sender_thread([&]() {
         while (true) {
-            auto& devices = device_registry.get_devices();
+            auto devices = device_registry.get_devices_copy();
             bool found_ready = false;
             for (const auto& d : devices) {
-                if (d.ready && d.device_id != get_my_device_id()) {
+                if (d.state == DeviceState::READY && d.device_id != get_my_device_id()) {
                     found_ready = true;
                     break;
                 }
@@ -46,13 +47,13 @@ int main() {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         std::this_thread::sleep_for(std::chrono::seconds(1)); // small buffer
-        nlohmann::json pkt;
-        pkt["type"] = "message";
-        pkt["device_id"] = get_my_device_id();
-        pkt["payload"]["text"] = "Hello from my system";
 
         log("Sending test message...");
-        device_registry.broadcast(pkt);
+        MessageService::broadcast_message("Hello from my system");
+    });
+
+    std::thread api_thread([&]() {
+        bootstrap_api_server();
     });
 
     // Main thread: Discovery (BLOCKING)
@@ -62,6 +63,7 @@ int main() {
     server_thread.join();
     discovery_service_thread.join();
     sender_thread.join();
+    api_thread.join();
 
     return 0;
 }

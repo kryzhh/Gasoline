@@ -16,12 +16,19 @@ namespace gasoline {
 
 void PacketRouter::route(const Packet& pkt, int socket_fd) {
     log_rx(pkt.device_id, pkt.type);
+    log("Routing packet type: " + pkt.type);
     if (pkt.type == "hello") {
         HelloHandler::handle(pkt, socket_fd);
         return;
     }
     if (pkt.type == "ping") {
+        device_registry.set_state_for_socket(socket_fd, DeviceState::READY);
         PingHandler::handle(pkt, socket_fd);
+        return;
+    }
+    if (pkt.type == "pong") {
+        device_registry.set_state_for_socket(socket_fd, DeviceState::READY);
+        log("Connection stabilized; device marked READY");
         return;
     }
     if (pkt.type == "message") {
