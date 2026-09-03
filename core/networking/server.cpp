@@ -6,55 +6,72 @@
 // Inclusion of all header files made (common stuff)
 #include "server.hpp"
 #include "../utils/logger.hpp"
-#include "../protocol/packet.hpp"
 #include "../../include/gasoline/config.hpp"
-#include "client_handler.hpp"
+#include "connection.hpp"
 
 // Server exclusive stuff
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstring>
-
-// Multithreading
-#include <thread> 
+#include <cerrno>
 
 namespace gasoline {
 
 void Server::start() { // Start function declaration
 
-    int server_fd, client_socket; // File descriptors 
+    int server_fd; // File descriptor 
     sockaddr_in address{}; // Stores IPv4 Info (Initialized to 0)
-    int addrlen = sizeof(address); 
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0); // Creates a new socket.
+    if (server_fd < 0) {
+        log(std::string("Failed to create server socket: ") + std::strerror(errno));
+        return;
+    }
+
     int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)); // Failsafe to ensure server is restarted instantly
-    // If this not added, OS would keep the port occupied for a cooldown period, which will give issues if server is to be restarted
-    // After some update or daemon restarts
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) != 0) {
+        log(std::string("Failed to set socket options: ") + std::strerror(errno));
+        close(server_fd);
+        return;
+    }
 
     address.sin_family = AF_INET; // Tells we are using IPv4
     address.sin_addr.s_addr = INADDR_ANY; // Accept connection from all interfaces
     address.sin_port = htons(SERVER_PORT); 
 
-    bind(server_fd, (struct sockaddr*)&address, sizeof(address)); // Binding port to address and given port
-    listen(server_fd, 5); // Up to 5 connections can be pending (basically a wait queue)
+    if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) != 0) {
+        log(std::string("Failed to bind server socket: ") + std::strerror(errno));
+        close(server_fd);
+        return;
+    }
+
+    if (listen(server_fd, 5) != 0) {
+        log(std::string("Failed to listen on server socket: ") + std::strerror(errno));
+        close(server_fd);
+        return;
+    }
 
     log("Listening on port " + std::to_string(SERVER_PORT));
 
     while (true) {
-        int client_socket = accept(server_fd,
-                                (struct sockaddr*)&address,
-                                (socklen_t*)&addrlen);
-        log("Device connected");
+        sockaddr_in client_address{};
+        socklen_t client_length = sizeof(client_address);
+        const int client_socket = accept(server_fd,
+                                (struct sockaddr*)&client_address,
+                                &client_length);
+        if (client_socket < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            log(std::string("Accept failed: ") + std::strerror(errno));
+            continue;
+        }
 
-        std::thread client_thread([client_socket]() { // New thread for each device connected
-            gasoline::ClientHandler handler(client_socket);
-            handler.handle();
+        log("Device connected on socket: " + std::to_string(client_socket));
 
-        });
-
-        client_thread.detach();
+        auto connection = Connection::create(client_socket);
+        connection->start();
     }
 }
 

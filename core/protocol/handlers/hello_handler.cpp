@@ -10,7 +10,7 @@
 
 namespace gasoline {
 
-void HelloHandler::handle(const Packet& pkt, int socket_fd) {
+HelloHandler::Action HelloHandler::handle(const Packet& pkt, int socket_fd) {
 
     std::string my_id = get_my_device_id();
     std::string peer_id = pkt.device_id;
@@ -18,20 +18,14 @@ void HelloHandler::handle(const Packet& pkt, int socket_fd) {
     log("My ID: " + my_id + " | Peer ID: " + peer_id);
 
     // Connection Ownership rule
-    try {
-        auto my_num = std::stoull(my_id);
-        auto peer_num = std::stoull(peer_id);
-
-        if (my_num > peer_num) {
-            log("Closing connection (peer should initiate)");
-
-            close(socket_fd);
-            device_registry.remove_device(socket_fd);
-            return;
-        }
-    }
-    catch (...) {
+    if (peer_id.empty() || my_id.empty()) {
         log("Invalid device_id format");
+        return Action::Disconnect;
+    }
+
+    if (my_id == peer_id || my_id > peer_id) {
+        log("Closing connection (peer should initiate)");
+        return Action::Disconnect;
     }
 
     Device device;
@@ -49,6 +43,7 @@ void HelloHandler::handle(const Packet& pkt, int socket_fd) {
     send_packet(socket_fd, ping);
 
     log("Device registered: " + device.device_id);
+    return Action::Continue;
 }
 
 }

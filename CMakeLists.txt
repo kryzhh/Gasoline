@@ -14,6 +14,8 @@ add_executable(gasoline
     daemon/main.cpp
 
     # Networking
+    core/networking/connection_manager.cpp
+    core/networking/connection.cpp
     core/networking/server.cpp
     core/networking/client_handler.cpp
     core/networking/send_packet.cpp
@@ -33,6 +35,9 @@ add_executable(gasoline
     core/utils/logger.cpp
     core/utils/packet_monitor.cpp
     core/utils/device_id.cpp
+
+    # Identity
+    core/identity/device_identity.cpp
 
     # Events
     core/events/event_bus.cpp

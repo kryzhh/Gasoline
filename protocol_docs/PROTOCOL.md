@@ -32,7 +32,7 @@ Example packet:
 ```json
 {
   "type": "hello",
-  "device_id": "phone_01",
+  "device_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "payload": {
     "device_name": "Krish Phone",
     "device_type": "android"
@@ -47,8 +47,9 @@ Defines the type of packet being transmitted.
 Currently implemented: "hello", "ping", "pong"
 
 ### device_id
-A unique identifier assigned to each device.
-Example: "phone_01", "laptop_linux"
+A persistent device identifier assigned to each Gasoline installation.
+It is a UUID-like 128-bit random value stored locally and reused across daemon restarts.
+Example: "550e8400-e29b-41d4-a716-446655440000"
 
 ### payload
 Packet-specific data associated with the message type.
@@ -62,6 +63,9 @@ Device information includes:
 - device_id: Unique string identifier
 - device_name: Human-readable name
 - device_type: Platform type ("android", "linux", "windows")
+
+The device identifier is an identity mechanism, not proof of authentication.
+Possession of a device_id alone must not be treated as trust or authorization.
 
 ---
 
@@ -222,6 +226,8 @@ During pairing:
 * user confirmation is required
 * the device is added to a trusted device list
 Trusted devices are stored locally.
+
+The persistent device ID introduced in the core does not replace pairing, trust management, or authentication.
 
 ---
 

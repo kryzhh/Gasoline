@@ -36,6 +36,7 @@ This includes:
 * Network communication (TCP server and client handling)
 * Packet serialization and parsing (JSON-based)
 * Device management and registry
+* Persistent local device identity
 * Packet routing with handler classes
 * Packet monitoring and logging
 * Logging utilities
@@ -47,6 +48,11 @@ All platform functionality is handled through the Platform Integration Layer.
 - **Protocol**: Packet parsing from JSON strings, routing system with dedicated handlers for each packet type.
 - **Device**: Registry for managing connected devices with thread-safe operations.
 - **Utils**: Logging functions for info/error messages, packet monitoring for RX/TX logging.
+
+### Connection Lifecycle
+TCP socket lifetime is owned by the networking connection/session layer.
+Incoming accepted sockets and outgoing sockets both converge on the same connection path, which owns the receive loop, write serialization, and cleanup.
+Protocol handlers only inspect packets and send protocol responses; they do not close sockets or remove registry entries.
 
 ---
 
@@ -78,7 +84,7 @@ Packet structure:
 ```json
 {
   "type": "hello",
-  "device_id": "phone_01",
+  "device_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "payload": {
     "device_name": "Krish Phone",
     "device_type": "android"
@@ -112,6 +118,11 @@ Each device is identified by:
 - socket_fd: Internal socket file descriptor
 
 The registry provides thread-safe add/remove/list operations for device management.
+
+## Device Identity
+Every Gasoline installation has a persistent randomly generated device ID stored locally under the user configuration directory, currently `~/.config/gasoline/device_id` on Linux.
+The identifier survives daemon restarts and is used as a logical device identity, not as authentication proof.
+Possession of the ID alone must not be treated as proof that a remote peer is trusted.
 
 ---
 
@@ -175,6 +186,7 @@ No external servers are required.
 
 ### Security Through Pairing
 Devices must explicitly trust each other before communication occurs.
+The persistent device ID is part of identity handling, but it is not an authentication mechanism by itself.
 
 ### Low Resource Usage
 Gasoline is intended to run continuously in the background.

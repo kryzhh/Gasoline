@@ -1,8 +1,8 @@
 #include "connect.hpp"
 #include "../utils/logger.hpp"
-#include "../protocol/packet.hpp"
-#include "../../include/gasoline/config.hpp"
 #include "../utils/device_id.hpp"
+#include "connection.hpp"
+#include "send_packet.hpp"
 
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -39,21 +39,23 @@ void connect_to_device(const std::string& ip, int port) {
 
     log("Connected to device");
 
+    auto connection = Connection::create(sock);
+    connection->start();
+
     // Send hello packet
-    Packet pkt;
-    pkt.type = "hello";
-    pkt.device_id = get_my_device_id();
-    pkt.payload["device_name"] = "Gasoline";
-    pkt.payload["device_type"] = "linux";
+    nlohmann::json pkt;
+    pkt["type"] = "hello";
+    pkt["device_id"] = get_my_device_id();
+    pkt["payload"]["device_name"] = "Gasoline";
+    pkt["payload"]["device_type"] = "linux";
 
-    std::string data = serialize_packet(pkt);
-
-    send(sock, data.c_str(), data.size(), 0);
+    if (send_packet(sock, pkt) < 0) {
+        log("Failed to send hello packet");
+        connection->request_disconnect("hello send failed");
+        return;
+    }
 
     log("Hello packet sent");
-
-    // For now: close after sending
-    // close(sock);
 }
 
 }

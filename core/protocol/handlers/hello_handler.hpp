@@ -5,7 +5,12 @@
 namespace gasoline {
 class HelloHandler {
 public:
-    static void handle(const Packet& pkt, int socket_fd);
+    enum class Action {
+        Continue,
+        Disconnect
+    };
+
+    static Action handle(const Packet& pkt, int socket_fd);
 };
 
 }
