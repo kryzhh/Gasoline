@@ -11,30 +11,39 @@
 
 namespace gasoline {
 
-PacketRouteAction PacketRouter::route(const Packet& pkt, int socket_fd) {
+PacketRouteResult PacketRouter::route(const Packet& pkt, int socket_fd) {
+    PacketRouteResult result;
     log_rx(pkt.device_id, pkt.type);
     log("Routing packet type: " + pkt.type);
     if (pkt.type == "hello") {
-        return HelloHandler::handle(pkt, socket_fd) == HelloHandler::Action::Disconnect
-                   ? PacketRouteAction::Disconnect
-                   : PacketRouteAction::Continue;
+        const auto hello_result = HelloHandler::handle(pkt, socket_fd);
+        if (hello_result.action == HelloHandler::Action::DisconnectCurrent) {
+            result.action = PacketRouteAction::Disconnect;
+            return result;
+        }
+        if (hello_result.action == HelloHandler::Action::DisconnectPeer) {
+            result.action = PacketRouteAction::DisconnectPeer;
+            result.peer_socket_fd = hello_result.peer_socket_fd;
+            return result;
+        }
+        return result;
     }
     if (pkt.type == "ping") {
         device_registry.set_state_for_socket(socket_fd, DeviceState::READY);
         PingHandler::handle(pkt, socket_fd);
-        return PacketRouteAction::Continue;
+        return result;
     }
     if (pkt.type == "pong") {
         device_registry.set_state_for_socket(socket_fd, DeviceState::READY);
         log("Connection stabilized; device marked READY");
-        return PacketRouteAction::Continue;
+        return result;
     }
     if (pkt.type == "message") {
         MessageHandler::handle(pkt, socket_fd);
-        return PacketRouteAction::Continue;
+        return result;
     }
     log("Unknown packet type: " + pkt.type);
-    return PacketRouteAction::Continue;
+    return result;
 }
 
-}
+} // namespace gasoline

@@ -12,13 +12,19 @@ namespace gasoline {
 
 enum class PacketRouteAction {
     Continue,
-    Disconnect
+    Disconnect,
+    DisconnectPeer
+};
+
+struct PacketRouteResult {
+    PacketRouteAction action = PacketRouteAction::Continue;
+    int peer_socket_fd = -1;
 };
 
 class PacketRouter {
 
 public:
-    static PacketRouteAction route(const Packet& pkt, int socket_fd);
+    static PacketRouteResult route(const Packet& pkt, int socket_fd);
 
 };
 

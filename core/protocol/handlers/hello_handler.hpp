@@ -7,10 +7,16 @@ class HelloHandler {
 public:
     enum class Action {
         Continue,
-        Disconnect
+        DisconnectCurrent,
+        DisconnectPeer
     };
 
-    static Action handle(const Packet& pkt, int socket_fd);
+    struct Result {
+        Action action = Action::Continue;
+        int peer_socket_fd = -1;
+    };
+
+    static Result handle(const Packet& pkt, int socket_fd);
 };
 
 }

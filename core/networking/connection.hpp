@@ -12,17 +12,24 @@ namespace gasoline {
 
 class Connection : public std::enable_shared_from_this<Connection> {
 public:
-    static std::shared_ptr<Connection> create(int socket_fd);
+    enum class Role {
+        Incoming,
+        Outgoing
+    };
+
+    static std::shared_ptr<Connection> create(int socket_fd, Role role);
 
     int socket_fd() const;
+    bool is_outgoing() const;
 
     void start();
     void request_disconnect(const std::string& reason);
     ssize_t send_packet(const nlohmann::json& packet);
 
 private:
-    explicit Connection(int socket_fd);
+    explicit Connection(int socket_fd, Role role);
 
+    void send_hello();
     void receive_loop();
     void finalize_disconnect(const std::string& reason);
     ssize_t send_packet_locked(const nlohmann::json& packet);
@@ -31,6 +38,7 @@ private:
     static constexpr size_t MAX_FRAME_SIZE = 65536;
 
     int socket_fd_;
+    Role role_;
     std::atomic<bool> started_{false};
     std::atomic<bool> stopping_{false};
     std::atomic<bool> cleaned_up_{false};

@@ -10,7 +10,7 @@ ClientHandler::ClientHandler(int socket_fd) {
 }
 
 void ClientHandler::handle() {
-    auto connection = Connection::create(socket_fd);
+    auto connection = Connection::create(socket_fd, Connection::Role::Incoming);
     connection->start();
 }
 

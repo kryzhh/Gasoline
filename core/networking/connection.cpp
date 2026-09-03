@@ -2,6 +2,7 @@
 
 #include "connection_manager.hpp"
 #include "../device/device_registry.hpp"
+#include "../utils/device_id.hpp"
 #include "../protocol/packet.hpp"
 #include "../protocol/router/packet_router.hpp"
 #include "../utils/logger.hpp"
@@ -24,17 +25,37 @@ bool is_receive_error_retryable(int error_code) {
 
 } // namespace
 
-std::shared_ptr<Connection> Connection::create(int socket_fd) {
-    auto connection = std::shared_ptr<Connection>(new Connection(socket_fd));
+std::shared_ptr<Connection> Connection::create(int socket_fd, Role role) {
+    auto connection = std::shared_ptr<Connection>(new Connection(socket_fd, role));
     ConnectionManager::instance().register_connection(connection);
     return connection;
 }
 
-Connection::Connection(int socket_fd)
-    : socket_fd_(socket_fd) {}
+Connection::Connection(int socket_fd, Role role)
+    : socket_fd_(socket_fd), role_(role) {}
 
 int Connection::socket_fd() const {
     return socket_fd_;
+}
+
+bool Connection::is_outgoing() const {
+    return role_ == Role::Outgoing;
+}
+
+void Connection::send_hello() {
+    nlohmann::json pkt;
+    pkt["type"] = "hello";
+    pkt["device_id"] = get_my_device_id();
+    pkt["payload"]["device_name"] = "Gasoline";
+    pkt["payload"]["device_type"] = "linux";
+
+    if (send_packet(pkt) < 0) {
+        log("Failed to send hello packet");
+        request_disconnect("hello send failed");
+        return;
+    }
+
+    log("Hello packet sent");
 }
 
 void Connection::start() {
@@ -49,6 +70,7 @@ void Connection::start() {
     }).detach();
 
     log("Session started for socket: " + std::to_string(socket_fd_));
+    send_hello();
 }
 
 void Connection::request_disconnect(const std::string& reason) {
@@ -157,8 +179,13 @@ void Connection::receive_loop() {
             try {
                 Packet pkt = parse_packet(packet_str);
                 log("Packet received on socket " + std::to_string(socket_fd_) + ": " + pkt.type);
-                const auto action = PacketRouter::route(pkt, socket_fd_);
-                if (action == PacketRouteAction::Disconnect) {
+                const auto route_result = PacketRouter::route(pkt, socket_fd_);
+                if (route_result.action == PacketRouteAction::DisconnectPeer && route_result.peer_socket_fd >= 0) {
+                    if (auto peer_connection = ConnectionManager::instance().find(route_result.peer_socket_fd)) {
+                        peer_connection->request_disconnect("duplicate connection replaced");
+                    }
+                }
+                if (route_result.action == PacketRouteAction::Disconnect) {
                     request_disconnect("protocol requested disconnect");
                     break;
                 }

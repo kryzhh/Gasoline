@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <mutex> // Using mutexes to ensure no race conditions since server is multithreaded
+#include <optional>
 
 #include "device.hpp"
 
@@ -16,7 +17,7 @@ class DeviceRegistry {
 
 public:
 
-    void add_device(const Device& device);
+    std::optional<Device> add_device(const Device& device);
     void remove_device(int socket_fd);
     void set_state_for_socket(int socket_fd, DeviceState state);
     void list_devices();

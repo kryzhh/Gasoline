@@ -7,17 +7,23 @@ namespace gasoline {
 
 DeviceRegistry device_registry;
 
-void DeviceRegistry::add_device(const Device& device) { // Adds device to the registry based on the socket it is connected to
+std::optional<Device> DeviceRegistry::add_device(const Device& device) { // Adds device to the registry based on the socket it is connected to
     std::lock_guard<std::mutex> lock(registry_mutex); // Ensure simultaenous access of registry (vector containing devices) happens in a safe manner 
+    std::optional<Device> replaced_device;
     devices.erase( // Ensuring no redundancy
         std::remove_if(devices.begin(), devices.end(),
             [&](const Device& d) {
-                return d.device_id == device.device_id;
+                if (d.device_id == device.device_id) {
+                    replaced_device = d;
+                    return true;
+                }
+                return false;
             }),
         devices.end()
     );
     devices.push_back(device);
     log("Device registered: " + device.device_name);
+    return replaced_device;
 }
 
 

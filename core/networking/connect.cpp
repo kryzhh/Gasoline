@@ -1,8 +1,6 @@
 #include "connect.hpp"
 #include "../utils/logger.hpp"
-#include "../utils/device_id.hpp"
 #include "connection.hpp"
-#include "send_packet.hpp"
 
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -39,23 +37,8 @@ void connect_to_device(const std::string& ip, int port) {
 
     log("Connected to device");
 
-    auto connection = Connection::create(sock);
+    auto connection = Connection::create(sock, Connection::Role::Outgoing);
     connection->start();
-
-    // Send hello packet
-    nlohmann::json pkt;
-    pkt["type"] = "hello";
-    pkt["device_id"] = get_my_device_id();
-    pkt["payload"]["device_name"] = "Gasoline";
-    pkt["payload"]["device_type"] = "linux";
-
-    if (send_packet(sock, pkt) < 0) {
-        log("Failed to send hello packet");
-        connection->request_disconnect("hello send failed");
-        return;
-    }
-
-    log("Hello packet sent");
 }
 
 }
