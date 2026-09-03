@@ -64,6 +64,16 @@ void DeviceRegistry::list_devices() { // Lists currently connected devices
     }
 }
 
+bool DeviceRegistry::is_already_connected(std::string device_id) {
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    for (const auto& device : devices) {
+        if (device.device_id == device_id && device.state != DeviceState::DISCONNECTED) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<Device> DeviceRegistry::get_devices_copy() {
     std::lock_guard<std::mutex> lock(registry_mutex);
     return devices;

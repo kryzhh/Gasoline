@@ -6,8 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Include directories
 include_directories(
+    .
     include
     core
+    platform/linux
 )
 
 add_executable(gasoline
@@ -44,7 +46,10 @@ add_executable(gasoline
 
     # Discovery
     core/discovery/discovery_client.cpp
-    platform/linux/discovery/discovery_service.cpp
+    core/discovery/discovery_service.cpp
+    platform/linux/discovery/avahi_publisher.cpp
+    platform/linux/discovery/avahi_browser.cpp
+    platform/linux/discovery/discovery_factory.cpp
 
     # Services
     services/message_service.cpp

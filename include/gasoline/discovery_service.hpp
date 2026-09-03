@@ -1,16 +1,22 @@
 #pragma once
 
-/*
-    Discovery service, for automatic discovery of server to client.
-    Advertise the Gasoline daemon on the local network using mDNS.
-    Create a service named "_gasoline._tcp.local". Devices query who this? and server gives IP + Port
-    Using avahi for Linux, will see what to use for Windows when we get there.
-*/
+#include <memory>
+
 namespace gasoline {
+
+class IDiscoveryPublisher;
 
 class DiscoveryService {
 public:
+    DiscoveryService();
+    explicit DiscoveryService(std::unique_ptr<IDiscoveryPublisher> publisher);
+    ~DiscoveryService();
+
     void start();
+    void stop();
+
+private:
+    std::unique_ptr<IDiscoveryPublisher> publisher_;
 };
 
-}
+} // namespace gasoline

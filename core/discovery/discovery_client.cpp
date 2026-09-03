@@ -1,238 +1,114 @@
 #include "discovery_client.hpp"
-#include "../utils/logger.hpp"
-#include "../networking/connect.hpp"
 
-#include <set>
-#include <ifaddrs.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include "device/device_registry.hpp"
+#include "networking/connect.hpp"
+#include "utils/device_id.hpp"
+#include "utils/logger.hpp"
 
-extern "C" {
-#include <avahi-client/client.h>
-#include <avahi-client/lookup.h>
-#include <avahi-common/simple-watch.h>
-#include <avahi-common/error.h>
-}
+#include <chrono>
+#include <thread>
+#include <utility>
 
 namespace gasoline {
 
-static AvahiSimplePoll* simple_poll = nullptr; // Avahi Poll
-static std::set<std::string> discovered_ips; // IPs discovered
-static std::set<std::string> connected_ips; // IPs already connected to
+namespace {
 
-// Gets local IP
-std::string get_local_ip() {
-    struct ifaddrs *ifaddr, *ifa;
-
-    if (getifaddrs(&ifaddr) == -1) {
-        return "";
-    }
-
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr) continue;
-
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            struct sockaddr_in* sa = (struct sockaddr_in*)ifa->ifa_addr;
-            std::string ip = inet_ntoa(sa->sin_addr);
-
-            // Skip loopback
-            if (ip != "127.0.0.1") {
-                freeifaddrs(ifaddr);
-                return ip;
-            }
-        }
-    }
-
-    freeifaddrs(ifaddr);
-    return "";
+bool is_hex_digit(char value) {
+    return (value >= '0' && value <= '9') ||
+           (value >= 'a' && value <= 'f') ||
+           (value >= 'A' && value <= 'F');
 }
 
-static void resolve_callback(
-    AvahiServiceResolver* r,
-    AvahiIfIndex interface,
-    AvahiProtocol protocol,
-    AvahiResolverEvent event,
-    const char* name,
-    const char* type,
-    const char* domain,
-    const char* host_name,
-    const AvahiAddress* address,
-    uint16_t port,
-    AvahiStringList* txt,
-    AvahiLookupResultFlags flags,
-    void* userdata
-) {
+bool is_valid_uuid(const std::string& value) {
+    if (value.size() != 36) {
+        return false;
+    }
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') {
+                return false;
+            }
+        } else if (!is_hex_digit(value[i])) {
+            return false;
+        }
+    }
+    return true;
+}
 
-    if (event == AVAHI_RESOLVER_FOUND) { // If address resolved
+} // namespace
 
-        char addr[AVAHI_ADDRESS_STR_MAX];
-        avahi_address_snprint(addr, sizeof(addr), address);
+DiscoveryClient::DiscoveryClient()
+    : DiscoveryClient(create_platform_discovery_browser()) {}
 
-        std::string ip = addr;
+DiscoveryClient::DiscoveryClient(std::unique_ptr<IDiscoveryBrowser> browser)
+    : browser_(std::move(browser)) {}
 
-        // Skip IPv6
-        if (ip.find(":") != std::string::npos) {
+DiscoveryClient::~DiscoveryClient() {
+    stop();
+}
+
+void DiscoveryClient::start() {
+    if (!browser_) {
+        log("DiscoveryClient: No discovery browser available");
+        return;
+    }
+
+    log("DiscoveryClient: Starting discovery browser...");
+    browser_->start([this](const DiscoveredDevice& device) {
+        on_device_discovered(device);
+    });
+}
+
+void DiscoveryClient::stop() {
+    if (browser_) {
+        browser_->stop();
+    }
+}
+
+void DiscoveryClient::on_device_discovered(const DiscoveredDevice& device) {
+    // 1. Authoritative TXT device_id check: ignore if missing or invalid
+    if (!is_valid_uuid(device.device_id)) {
+        log("Discovered service '" + device.device_name + "' has invalid or missing device_id ('" +
+            device.device_id + "'); ignoring");
+        return;
+    }
+
+    // 2. Ignore our own service by comparing advertised UUID with local persistent UUID
+    const std::string my_id = get_my_device_id();
+    if (device.device_id == my_id) {
+        log("DiscoveryClient: Discovered own service (" + my_id + "); ignoring");
+        return;
+    }
+
+    // 3. Deduplicate by UUID: check if already connected or connection currently pending
+    {
+        std::lock_guard<std::mutex> lock(discovery_mutex_);
+        if (device_registry.is_already_connected(device.device_id)) {
+            log("Device " + device.device_id + " is already connected; skipping");
             return;
         }
 
-        // Skip loopback
-        if (ip == "127.0.0.1") {
+        if (pending_connections_.count(device.device_id)) {
+            log("Connection to device " + device.device_id + " is already pending; skipping");
             return;
         }
 
-        std::string local_ip = get_local_ip();
-        std::string subnet = local_ip.substr(0, local_ip.find_last_of('.') + 1);
+        pending_connections_.insert(device.device_id);
+    }
 
-        // ONLY allow same subnet
-        if (!(ip.rfind(subnet, 0) == 0)) {
-            return;
-        }
+    log("Discovered new device: " + device.device_id + " at " + device.ip_address + ":" + std::to_string(device.port));
 
-        // Avoid duplicate discovery
-        if (discovered_ips.count(ip)) {
-            return;
-        }
-        discovered_ips.insert(ip);
-
-        // std::string local_ip = get_local_ip();
-        // if (ip == local_ip) {
-        //     log("Skipping self connection");
-        //     return;
-        // }
-
-        // Avoid duplicate connections
-        if (connected_ips.count(ip)) {
-            log("Already connected, skipping");
-            return;
-        }
-        connected_ips.insert(ip);
-
-        // Log it
-        log(std::string("Name: ") + name);
-        log(std::string("IP: ") + addr);
-        log(std::string("Port: ") + std::to_string(port));
-
-        log("Attempting connection to: " + ip);
+    // 4. Connect asynchronously to avoid blocking the discovery callback
+    std::thread([this, device_id = device.device_id, ip = device.ip_address, port = device.port]() {
+        log("Attempting connection to: " + ip + ":" + std::to_string(port));
         connect_to_device(ip, port);
 
-    } else {
-        log("Failed to resolve service");
-    }
+        // Allow time for handshake to complete or connect to fail
+        std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    avahi_service_resolver_free(r);
+        std::lock_guard<std::mutex> lock(discovery_mutex_);
+        pending_connections_.erase(device_id);
+    }).detach();
 }
 
-// Browser callback
-static void browse_callback(
-    AvahiServiceBrowser* b,
-    AvahiIfIndex interface,
-    AvahiProtocol protocol,
-    AvahiBrowserEvent event,
-    const char* name,
-    const char* type,
-    const char* domain,
-    AvahiLookupResultFlags flags,
-    void* userdata
-) {
-
-    AvahiClient* client = (AvahiClient*)userdata;
-
-    switch (event) {
-
-        case AVAHI_BROWSER_NEW: // If a new service found
-            log(std::string("Discovered service: ") + name);
-
-            avahi_service_resolver_new( // Resolve it
-                client,
-                interface,
-                protocol,
-                name,
-                type,
-                domain,
-                AVAHI_PROTO_UNSPEC,
-                (AvahiLookupFlags)0,
-                resolve_callback,
-                nullptr
-            );
-            break;
-
-        case AVAHI_BROWSER_REMOVE:
-            log(std::string("Service removed: ") + name);
-            break;
-
-        case AVAHI_BROWSER_FAILURE:
-            log("Browser failure");
-            break;
-
-        default:
-            break;
-    }
-}
-
-// Client callback
-static void client_callback(
-    AvahiClient* client,
-    AvahiClientState state,
-    void* userdata
-) {
-
-    if (state == AVAHI_CLIENT_S_RUNNING) {
-
-        log("Avahi client running. Starting browse...");
-
-        AvahiServiceBrowser* browser = avahi_service_browser_new(
-            client,
-            AVAHI_IF_UNSPEC,
-            AVAHI_PROTO_UNSPEC,
-            "_gasoline._tcp",
-            nullptr,
-            (AvahiLookupFlags)0,
-            browse_callback,
-            client
-        );
-
-        if (!browser) {
-            log("Failed to create service browser");
-        }
-    }
-
-    else if (state == AVAHI_CLIENT_FAILURE) {
-        log("Avahi client failure");
-        avahi_simple_poll_quit(simple_poll);
-    }
-}
-
-// Start discovery client
-void DiscoveryClient::start() {
-
-    log("Starting discovery client...");
-
-    int error;
-
-    simple_poll = avahi_simple_poll_new();
-
-    if (!simple_poll) {
-        log("Failed to create Avahi poll object");
-        return;
-    }
-
-    AvahiClient* client = avahi_client_new(
-        avahi_simple_poll_get(simple_poll),
-        (AvahiClientFlags)0,
-        client_callback,
-        nullptr,
-        &error
-    );
-
-    if (!client) {
-        log(std::string("Failed to create Avahi client: ") +
-            avahi_strerror(error));
-        return;
-    }
-
-    log("Discovery client running...");
-
-    avahi_simple_poll_loop(simple_poll);
-}
-
-}
+} // namespace gasoline

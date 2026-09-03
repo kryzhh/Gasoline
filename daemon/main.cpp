@@ -1,12 +1,12 @@
 // Remember to enjoy the light before it's gone
-#include "../core/networking/server.hpp"
+#include "networking/server.hpp"
 #include <gasoline/discovery_service.hpp>
-#include "../core/discovery/discovery_client.hpp"
-#include "../core/utils/device_id.hpp"
-#include "../core/device/device_registry.hpp"
-#include "../core/utils/logger.hpp"
-#include "../services/message_service.hpp"
-#include "../interface/api_server.hpp"
+#include "discovery/discovery_client.hpp"
+#include "utils/device_id.hpp"
+#include "device/device_registry.hpp"
+#include "utils/logger.hpp"
+#include "services/message_service.hpp"
+#include "interface/api_server.hpp"
 
 #include <signal.h>
 #include <thread>
