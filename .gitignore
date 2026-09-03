@@ -27,8 +27,8 @@ out/
 
 # Executables generated during development
 
-gasoline
-gasoline.exe
+/gasoline
+/gasoline.exe
 
 # =========================
 
