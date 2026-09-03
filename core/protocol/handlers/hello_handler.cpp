@@ -17,16 +17,22 @@ HelloHandler::Action HelloHandler::handle(const Packet& pkt, int socket_fd) {
 
     log("My ID: " + my_id + " | Peer ID: " + peer_id);
 
-    // Connection Ownership rule
     if (peer_id.empty() || my_id.empty()) {
-        log("Invalid device_id format");
+        log("Missing device_id in hello packet");
         return Action::Disconnect;
     }
 
-    if (my_id == peer_id || my_id > peer_id) {
-        log("Closing connection (peer should initiate)");
+    if (my_id == peer_id) {
+        log("Peer is self; rejecting connection");
         return Action::Disconnect;
     }
+
+    if (my_id < peer_id) {
+        log("Peer UUID is higher than local UUID; rejecting incoming connection");
+        return Action::Disconnect;
+    }
+
+    log("Peer UUID is lower than local UUID; keeping incoming connection");
 
     Device device;
 
