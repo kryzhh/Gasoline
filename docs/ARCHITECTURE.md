@@ -54,6 +54,17 @@ TCP socket lifetime is owned by the networking connection/session layer.
 Incoming accepted sockets and outgoing sockets both converge on the same connection path, which owns the receive loop, write serialization, and cleanup.
 Protocol handlers only inspect packets and send protocol responses; they do not close sockets or remove registry entries.
 
+### Local Control API
+The Linux HTTP control API listens only on `127.0.0.1:42667` for local desktop
+clients and development tools. It preserves `GET /devices`, `GET /events`, and
+`POST /send`. Direct connections to the host's LAN address on this port are not
+accepted. The device-to-device TCP service on port 42666 is separate.
+
+The API sends no CORS headers; browser cross-origin access is not supported.
+Loopback binding is not authentication: other local processes can still call the
+API, and removing CORS does not prevent every browser-originated request. There
+is no caller authentication or pairing approval in this interface yet.
+
 ---
 
 ## Platform Integration Layer

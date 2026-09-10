@@ -42,9 +42,6 @@ bool send_http_response(int client_fd, int status_code, const std::string& statu
                         const std::string& body, const std::string& content_type = "application/json") {
     const std::string response =
         "HTTP/1.1 " + std::to_string(status_code) + " " + status_text + "\r\n" +
-        "Access-Control-Allow-Origin: *\r\n" +
-        "Access-Control-Allow-Headers: Content-Type\r\n" +
-        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
         "Content-Type: " + content_type + "\r\n" +
         "Content-Length: " + std::to_string(body.size()) + "\r\n" +
         "Connection: close\r\n\r\n" +
@@ -168,7 +165,7 @@ void handle_post_send(int client_fd, const std::string& request_body) {
         send_http_response(client_fd, 200, "OK", R"({"status":"queued"})");
     } catch (const std::exception& e) {
         send_http_response(client_fd, 400, "Bad Request",
-                           std::string("{\"error\":\"") + e.what() + "\"}");
+                           nlohmann::json{{"error", e.what()}}.dump());
     }
 }
 
@@ -224,7 +221,7 @@ void bootstrap_api_server() {
 
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons(API_PORT);
 
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
@@ -239,7 +236,7 @@ void bootstrap_api_server() {
         return;
     }
 
-    log("API server listening on port " + std::to_string(API_PORT));
+    log("API server listening on 127.0.0.1:" + std::to_string(API_PORT) + " (loopback only)");
 
     while (true) {
         int client_fd = accept(server_fd, nullptr, nullptr);
