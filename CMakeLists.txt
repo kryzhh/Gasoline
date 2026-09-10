@@ -64,3 +64,26 @@ target_link_libraries(gasoline
     avahi-common
     pthread
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(session_tests
+        tests/session_tests.cpp
+        core/networking/connection.cpp
+        core/networking/connection_manager.cpp
+        core/networking/send_packet.cpp
+        core/protocol/packet.cpp
+        core/protocol/router/packet_router.cpp
+        core/protocol/handlers/hello_handler.cpp
+        core/protocol/handlers/ping_handler.cpp
+        core/protocol/handlers/message_handler.cpp
+        core/device/device_registry.cpp
+        core/events/event_bus.cpp
+        core/utils/logger.cpp
+        core/utils/packet_monitor.cpp
+        services/message_service.cpp
+    )
+    target_link_libraries(session_tests pthread)
+    add_test(NAME session_tests COMMAND session_tests)
+    set_tests_properties(session_tests PROPERTIES TIMEOUT 60)
+endif()

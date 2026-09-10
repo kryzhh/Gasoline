@@ -10,7 +10,6 @@
 
 namespace gasoline {
 
-ssize_t send_packet(int socket_fd, const nlohmann::json& packet);
 ssize_t send_packet(const std::shared_ptr<class Connection>& connection, const nlohmann::json& packet);
 
 }

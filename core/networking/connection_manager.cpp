@@ -10,7 +10,7 @@ namespace gasoline {
 namespace {
 
 std::mutex manager_mutex;
-std::unordered_map<int, std::weak_ptr<Connection>> connections;
+std::unordered_map<uint64_t, std::weak_ptr<Connection>> connections;
 
 } // namespace
 
@@ -21,12 +21,12 @@ ConnectionManager& ConnectionManager::instance() {
 
 void ConnectionManager::register_connection(const std::shared_ptr<Connection>& connection) {
     std::lock_guard<std::mutex> lock(manager_mutex);
-    connections[connection->socket_fd()] = connection;
+    connections[connection->session_id()] = connection;
 }
 
-std::shared_ptr<Connection> ConnectionManager::find(int socket_fd) {
+std::shared_ptr<Connection> ConnectionManager::find(uint64_t session_id) {
     std::lock_guard<std::mutex> lock(manager_mutex);
-    const auto iterator = connections.find(socket_fd);
+    const auto iterator = connections.find(session_id);
     if (iterator == connections.end()) {
         return nullptr;
     }
@@ -38,9 +38,9 @@ std::shared_ptr<Connection> ConnectionManager::find(int socket_fd) {
     return connection;
 }
 
-void ConnectionManager::unregister_connection(int socket_fd) {
+void ConnectionManager::unregister_connection(uint64_t session_id) {
     std::lock_guard<std::mutex> lock(manager_mutex);
-    connections.erase(socket_fd);
+    connections.erase(session_id);
 }
 
 } // namespace gasoline

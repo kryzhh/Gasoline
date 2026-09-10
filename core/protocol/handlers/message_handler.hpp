@@ -11,7 +11,7 @@ namespace gasoline {
 
 class MessageHandler {
 public:
-    static void handle(const Packet& pkt, int socket_fd);
+    static void handle(const Packet& pkt);
 };
 
 }

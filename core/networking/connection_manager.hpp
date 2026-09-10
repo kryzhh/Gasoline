@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 
 namespace gasoline {
 
@@ -11,8 +12,8 @@ public:
     static ConnectionManager& instance();
 
     void register_connection(const std::shared_ptr<Connection>& connection);
-    std::shared_ptr<Connection> find(int socket_fd);
-    void unregister_connection(int socket_fd);
+    std::shared_ptr<Connection> find(uint64_t session_id);
+    void unregister_connection(uint64_t session_id);
 
 private:
     ConnectionManager() = default;

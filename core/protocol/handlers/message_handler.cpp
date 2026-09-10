@@ -4,7 +4,7 @@
 
 namespace gasoline {
 
-void MessageHandler::handle(const Packet& pkt, int socket_fd) {
+void MessageHandler::handle(const Packet& pkt) {
 
     if (!pkt.payload.contains("text")) { // Packet should be valid and have a text field
         log("Message packet missing 'text'");

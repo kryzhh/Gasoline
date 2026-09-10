@@ -17,9 +17,14 @@ class DeviceRegistry {
 
 public:
 
-    std::optional<Device> add_device(const Device& device);
-    void remove_device(int socket_fd);
-    void set_state_for_socket(int socket_fd, DeviceState state);
+    struct RegistrationResult {
+        bool accepted = false;
+        std::optional<Device> replaced_device;
+    };
+
+    RegistrationResult add_device(const Device& device);
+    void remove_device(uint64_t session_id);
+    bool set_state_for_session(uint64_t session_id, DeviceState state);
     void list_devices();
     bool is_already_connected(std::string device_id);
     std::vector<Device> get_devices_copy();

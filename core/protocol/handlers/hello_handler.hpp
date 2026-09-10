@@ -2,7 +2,9 @@
 
 // Hello packet handler, basically registers device.
 #include "../packet.hpp"
+#include <memory>
 namespace gasoline {
+class Connection;
 class HelloHandler {
 public:
     enum class Action {
@@ -13,10 +15,10 @@ public:
 
     struct Result {
         Action action = Action::Continue;
-        int peer_socket_fd = -1;
+        std::shared_ptr<Connection> peer_connection;
     };
 
-    static Result handle(const Packet& pkt, int socket_fd);
+    static Result handle(const Packet& pkt, const std::shared_ptr<Connection>& connection);
 };
 
 }

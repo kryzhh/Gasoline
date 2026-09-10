@@ -1,5 +1,6 @@
 #pragma once
 #include "../packet.hpp"
+#include <memory>
 
 // Implementing Packet router 
 /*
@@ -10,6 +11,8 @@
 
 namespace gasoline {
 
+class Connection;
+
 enum class PacketRouteAction {
     Continue,
     Disconnect,
@@ -18,13 +21,13 @@ enum class PacketRouteAction {
 
 struct PacketRouteResult {
     PacketRouteAction action = PacketRouteAction::Continue;
-    int peer_socket_fd = -1;
+    std::shared_ptr<Connection> peer_connection;
 };
 
 class PacketRouter {
 
 public:
-    static PacketRouteResult route(const Packet& pkt, int socket_fd);
+    static PacketRouteResult route(const Packet& pkt, const std::shared_ptr<Connection>& connection);
 
 };
 

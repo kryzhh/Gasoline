@@ -54,6 +54,43 @@ TCP socket lifetime is owned by the networking connection/session layer.
 Incoming accepted sockets and outgoing sockets both converge on the same connection path, which owns the receive loop, write serialization, and cleanup.
 Protocol handlers only inspect packets and send protocol responses; they do not close sockets or remove registry entries.
 
+Each Connection has a process-local, monotonically allocated session ID.
+ConnectionManager lookup and DeviceRegistry state updates/removal use that ID,
+not a socket descriptor that the OS may reuse. Registry snapshots contain a weak
+Connection reference; application sends lock that reference and use the owning
+session. There is no descriptor-based send overload or raw-send fallback.
+
+The receive worker holds a strong Connection reference until cleanup finishes.
+The destructor also cleans up connections that were never started. Shutdown is
+idempotent and wakes pending reads/writes without closing the descriptor. Final
+close waits for the serialized writer to exit; later sends fail without touching
+the socket. Nonblocking sends use a 10-second monotonic write deadline so a peer
+that stops reading cannot hold a writer indefinitely.
+
+A session has 10 seconds from creation to complete `hello` followed by
+`ping`/`pong` and reach READY, measured with `std::chrono::steady_clock`. Partial
+traffic does not reset this deadline. READY sessions have no idle timeout in this
+milestone. Only one valid peer hello is accepted. Repeated hello, changed packet
+identity, malformed JSON, and packets before the first hello close the session.
+Message handling after hello is unchanged, but messages do not complete or extend
+the handshake. These checks enforce protocol order, not authentication.
+
+Newline-delimited JSON framing is unchanged. Each frame is limited to 65,536
+bytes excluding the newline, checked before appending to the receive buffer,
+whether or not the terminating newline has arrived. The same limit applies to
+outgoing frames. Fragmented and coalesced frames remain supported.
+
+Duplicate arbitration and registration occur under one registry lock. The
+connection initiated by the lower UUID is preferred when opposite directions
+compete; a live incumbent wins same-direction ties. Replaced sessions are stopped
+through their Connection handles, and their later cleanup cannot remove the new
+owner's registry entry.
+
+Local regression tests are available through `ctest --test-dir build
+--output-on-failure` after a build with `BUILD_TESTING=ON`. They use Unix socket
+pairs and a fixed test identity, without discovery, remote peers, or access to
+the user's identity file.
+
 ### Local Control API
 The Linux HTTP control API listens only on `127.0.0.1:42667` for local desktop
 clients and development tools. It preserves `GET /devices`, `GET /events`, and
