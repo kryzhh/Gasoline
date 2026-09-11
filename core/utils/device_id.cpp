@@ -4,10 +4,13 @@
 
 namespace gasoline {
 
-std::string get_my_device_id() {
+const DeviceIdentity& get_my_device_identity() {
     static const DeviceIdentity identity = DeviceIdentity::load_or_create();
-    return identity.device_id();
+    return identity;
+}
 
+std::string get_my_device_id() {
+    return get_my_device_identity().device_id();
 }
 
 }

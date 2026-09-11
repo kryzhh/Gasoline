@@ -2,195 +2,236 @@
 
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
-#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <stdexcept>
-#include <string>
-#include <system_error>
-#include <utility>
+#include <string_view>
 #include <thread>
+#include <utility>
 
 namespace gasoline {
-
 namespace {
+
+constexpr std::string_view IDENTITY_MARKER = "\ned25519-v1\n";
+constexpr std::string_view KEY_MAGIC = "GASOLINE-ED25519-V1\n";
+constexpr size_t UUID_SIZE = 36;
+constexpr size_t KEY_FILE_SIZE = KEY_MAGIC.size() + UUID_SIZE +
+                                 crypto_sign_PUBLICKEYBYTES + crypto_sign_SECRETKEYBYTES;
 
 std::runtime_error make_error(const std::string& message) {
     return std::runtime_error("Device identity error: " + message);
 }
 
+class FileDescriptor {
+public:
+    explicit FileDescriptor(int fd) : fd_(fd) {}
+    ~FileDescriptor() { if (fd_ >= 0) ::close(fd_); }
+    FileDescriptor(const FileDescriptor&) = delete;
+    FileDescriptor& operator=(const FileDescriptor&) = delete;
+    FileDescriptor(FileDescriptor&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
+    FileDescriptor& operator=(FileDescriptor&& other) noexcept {
+        if (this != &other) {
+            if (fd_ >= 0) ::close(fd_);
+            fd_ = std::exchange(other.fd_, -1);
+        }
+        return *this;
+    }
+    int get() const { return fd_; }
+    void close_checked() {
+        if (::close(std::exchange(fd_, -1)) != 0) {
+            throw make_error("failed to close persisted identity file");
+        }
+    }
+private:
+    int fd_;
+};
+
+template<size_t Size>
+struct SecretBuffer {
+    std::array<unsigned char, Size> bytes{};
+    ~SecretBuffer() { sodium_memzero(bytes.data(), bytes.size()); }
+    SecretBuffer() = default;
+    SecretBuffer(const SecretBuffer&) = delete;
+    SecretBuffer& operator=(const SecretBuffer&) = delete;
+};
+
+void initialize_sodium() {
+    static const int result = sodium_init();
+    if (result < 0) {
+        throw make_error("libsodium initialization failed");
+    }
+}
+
 std::filesystem::path resolve_home_directory() {
-    struct passwd* password_entry = getpwuid(getuid());
-    if (password_entry == nullptr || password_entry->pw_dir == nullptr || password_entry->pw_dir[0] == '\0') {
+    const auto* entry = getpwuid(getuid());
+    if (entry == nullptr || entry->pw_dir == nullptr || entry->pw_dir[0] == '\0') {
         throw make_error("unable to determine the current user's home directory");
     }
-
-    return std::filesystem::path(password_entry->pw_dir);
+    return entry->pw_dir;
 }
 
-bool is_hex_digit(char value) {
-    return std::isdigit(static_cast<unsigned char>(value)) != 0 ||
-           (value >= 'a' && value <= 'f') ||
-           (value >= 'A' && value <= 'F');
-}
-
-bool is_valid_uuid(const std::string& value) {
-    if (value.size() != 36) {
-        return false;
-    }
-
-    for (size_t index = 0; index < value.size(); ++index) {
-        if (index == 8 || index == 13 || index == 18 || index == 23) {
-            if (value[index] != '-') {
-                return false;
-            }
-            continue;
-        }
-
-        if (!is_hex_digit(value[index])) {
+bool is_valid_uuid(std::string_view value) {
+    if (value.size() != UUID_SIZE) return false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (value[i] != '-') return false;
+        } else if (!((value[i] >= '0' && value[i] <= '9') ||
+                     (value[i] >= 'a' && value[i] <= 'f') ||
+                     (value[i] >= 'A' && value[i] <= 'F'))) {
             return false;
         }
     }
-
     return true;
-}
-
-std::string read_file_contents(const std::filesystem::path& identity_path) {
-    std::ifstream file(identity_path);
-    if (!file.is_open()) {
-        throw make_error("failed to open identity file: " + identity_path.string());
-    }
-
-    std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    if (!file.good() && !file.eof()) {
-        throw make_error("failed to read identity file: " + identity_path.string());
-    }
-
-    while (!contents.empty() && (contents.back() == '\n' || contents.back() == '\r')) {
-        contents.pop_back();
-    }
-
-    if (!is_valid_uuid(contents)) {
-        throw make_error("identity file contains an invalid device ID: " + identity_path.string());
-    }
-
-    return contents;
 }
 
 std::string generate_uuid() {
     std::array<unsigned char, 16> bytes{};
-
-    const int random_fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (random_fd < 0) {
-        throw make_error(std::string("failed to open /dev/urandom: ") + std::strerror(errno));
-    }
-
-    size_t bytes_read = 0;
-    while (bytes_read < bytes.size()) {
-        const ssize_t count = ::read(random_fd, bytes.data() + bytes_read, bytes.size() - bytes_read);
-        if (count < 0) {
-            const int error_code = errno;
-            ::close(random_fd);
-            throw make_error(std::string("failed to read random bytes: ") + std::strerror(error_code));
-        }
-        if (count == 0) {
-            ::close(random_fd);
-            throw make_error("unexpected end of random source while generating identity");
-        }
-
-        bytes_read += static_cast<size_t>(count);
-    }
-
-    ::close(random_fd);
-
+    randombytes_buf(bytes.data(), bytes.size());
     bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0F) | 0x40);
     bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3F) | 0x80);
-
-    static const char* hex_digits = "0123456789abcdef";
+    constexpr char hex[] = "0123456789abcdef";
     std::string uuid;
-    uuid.reserve(36);
-
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        if (index == 4 || index == 6 || index == 8 || index == 10) {
-            uuid.push_back('-');
-        }
-        uuid.push_back(hex_digits[(bytes[index] >> 4) & 0x0F]);
-        uuid.push_back(hex_digits[bytes[index] & 0x0F]);
+    uuid.reserve(UUID_SIZE);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) uuid.push_back('-');
+        uuid.push_back(hex[bytes[i] >> 4]);
+        uuid.push_back(hex[bytes[i] & 0x0F]);
     }
-
     return uuid;
 }
 
-void write_file_contents(const std::filesystem::path& file_path, const std::string& contents) {
-    const int file_fd = ::open(file_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (file_fd < 0) {
-        throw make_error(std::string("failed to create identity file: ") + file_path.string() + ": " + std::strerror(errno));
-    }
+void sync_file(int fd);
 
-    const std::string data = contents + "\n";
-    size_t written = 0;
-    while (written < data.size()) {
-        const ssize_t count = ::write(file_fd, data.data() + written, data.size() - written);
-        if (count < 0) {
-            const int error_code = errno;
-            ::close(file_fd);
-            throw make_error(std::string("failed to write identity file: ") + file_path.string() + ": " + std::strerror(error_code));
+void sync_directory_tree(int directory) {
+    FileDescriptor current(::fcntl(directory, F_DUPFD_CLOEXEC, 0));
+    if (current.get() < 0) throw make_error("unable to duplicate identity directory handle");
+    // Existing entries may come from an interrupted attempt. Flush every
+    // containing directory, following the opened tree rather than path strings.
+    for (;;) {
+        sync_file(current.get());
+        FileDescriptor parent(::openat(current.get(), "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        struct stat current_info{}, parent_info{};
+        if (parent.get() < 0 || ::fstat(current.get(), &current_info) != 0 ||
+            ::fstat(parent.get(), &parent_info) != 0) {
+            throw make_error("unable to inspect identity directory's ancestor");
         }
+        if (current_info.st_dev == parent_info.st_dev && current_info.st_ino == parent_info.st_ino) return;
+        current = std::move(parent);
+    }
+}
+
+FileDescriptor open_identity_directory(const std::filesystem::path& parent) {
+    std::error_code error;
+    std::filesystem::create_directories(parent, error);
+    if (error) throw make_error("failed to create identity directory: " + error.message());
+    FileDescriptor directory(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    struct stat info{};
+    if (directory.get() < 0 || ::fstat(directory.get(), &info) != 0 || info.st_uid != geteuid()) {
+        throw make_error("identity directory is inaccessible, symlinked, or not owned by this user");
+    }
+    if (::fchmod(directory.get(), 0700) != 0) {
+        throw make_error("failed to secure identity directory permissions");
+    }
+    sync_directory_tree(directory.get());
+    return directory;
+}
+
+bool entry_exists(int directory, const std::string& name) {
+    struct stat info{};
+    if (::fstatat(directory, name.c_str(), &info, AT_SYMLINK_NOFOLLOW) == 0) return true;
+    if (errno == ENOENT) return false;
+    throw make_error("unable to inspect " + name + ": " + std::strerror(errno));
+}
+
+FileDescriptor open_private_file(int directory, const std::string& name, int flags) {
+    FileDescriptor file(::openat(directory, name.c_str(), flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600));
+    struct stat info{};
+    if (file.get() < 0 || ::fstat(file.get(), &info) != 0) {
+        throw make_error("unable to access " + name);
+    }
+    if (!S_ISREG(info.st_mode) || info.st_uid != geteuid() || info.st_nlink != 1 ||
+        (info.st_mode & 07777) != 0600) {
+        throw make_error(name + " must be a regular, user-owned 0600 file without additional hard links");
+    }
+    return file;
+}
+
+void sync_file(int fd) {
+    while (::fsync(fd) != 0) {
+        if (errno != EINTR) throw make_error("failed to flush identity storage");
+    }
+}
+
+FileDescriptor acquire_lock(int directory, const std::string& name) {
+    auto lock = open_private_file(directory, name, O_RDWR | O_CREAT);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (::flock(lock.get(), LOCK_EX | LOCK_NB) != 0) {
+        if (errno != EINTR && errno != EWOULDBLOCK && errno != EAGAIN) {
+            throw make_error("unable to lock identity storage");
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            throw make_error("timed out waiting for identity storage lock");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return lock;
+}
+
+size_t read_file(int directory, const std::string& name, unsigned char* data, size_t capacity) {
+    auto file = open_private_file(directory, name, O_RDONLY);
+    size_t size = 0;
+    while (size < capacity) {
+        const auto count = ::read(file.get(), data + size, capacity - size);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            throw make_error("failed to read " + name);
+        }
+        if (count == 0) return size;
+        size += static_cast<size_t>(count);
+    }
+    unsigned char extra = 0;
+    ssize_t count;
+    do { count = ::read(file.get(), &extra, 1); } while (count < 0 && errno == EINTR);
+    sodium_memzero(&extra, sizeof(extra));
+    if (count != 0) throw make_error("invalid size or read failure in " + name);
+    return size;
+}
+
+void atomic_write(int directory, const std::string& name, const unsigned char* data, size_t size) {
+    const auto temporary = name + ".tmp";
+    auto file = open_private_file(directory, temporary, O_WRONLY | O_CREAT | O_EXCL);
+    size_t written = 0;
+    while (written < size) {
+        const auto count = ::write(file.get(), data + written, size - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) throw make_error("failed to write " + temporary);
         written += static_cast<size_t>(count);
     }
-
-    if (::fsync(file_fd) != 0) {
-        const int error_code = errno;
-        ::close(file_fd);
-        throw make_error(std::string("failed to flush identity file: ") + file_path.string() + ": " + std::strerror(error_code));
+    sync_file(file.get());
+    file.close_checked();
+    if (::renameat(directory, temporary.c_str(), directory, name.c_str()) != 0) {
+        throw make_error("failed to publish " + name);
     }
-
-    if (::close(file_fd) != 0) {
-        throw make_error(std::string("failed to close identity file: ") + file_path.string() + ": " + std::strerror(errno));
-    }
-}
-
-void remove_if_exists(const std::filesystem::path& file_path) {
-    std::error_code error;
-    std::filesystem::remove(file_path, error);
-}
-
-std::filesystem::path lock_path_for(const std::filesystem::path& identity_path) {
-    return identity_path.string() + ".lock";
-}
-
-std::filesystem::path temp_path_for(const std::filesystem::path& identity_path) {
-    return identity_path.string() + ".tmp";
-}
-
-void ensure_parent_directory(const std::filesystem::path& identity_path) {
-    const std::filesystem::path parent = identity_path.parent_path();
-    if (parent.empty()) {
-        return;
-    }
-
-    std::error_code error;
-    if (std::filesystem::exists(parent, error) && !std::filesystem::is_directory(parent, error)) {
-        throw make_error("identity path parent exists but is not a directory: " + parent.string());
-    }
-
-    if (!std::filesystem::create_directories(parent, error) && error) {
-        throw make_error("failed to create identity directory: " + parent.string() + ": " + error.message());
-    }
+    sync_file(directory);
+    // Failed writes deliberately leave evidence, never an invitation to rekey.
 }
 
 } // namespace
 
-DeviceIdentity::DeviceIdentity(std::string device_id)
-    : device_id_(std::move(device_id)) {}
+DeviceIdentity::DeviceIdentity(std::string device_id, const PublicKey& public_key, const PrivateKey& private_key)
+    : device_id_(std::move(device_id)), public_key_(public_key), private_key_(private_key) {}
+
+DeviceIdentity::~DeviceIdentity() {
+    sodium_memzero(private_key_.data(), private_key_.size());
+}
 
 std::filesystem::path DeviceIdentity::default_identity_path() {
     return resolve_home_directory() / ".config" / "gasoline" / "device_id";
@@ -201,83 +242,82 @@ DeviceIdentity DeviceIdentity::load_or_create() {
 }
 
 DeviceIdentity DeviceIdentity::load_or_create(const std::filesystem::path& identity_path) {
-    std::error_code exists_error;
-    if (std::filesystem::exists(identity_path, exists_error)) {
-        return DeviceIdentity(read_file_contents(identity_path));
-    }
-    if (exists_error) {
-        throw make_error("failed to inspect identity file: " + identity_path.string() + ": " + exists_error.message());
-    }
-
-    ensure_parent_directory(identity_path);
-
-    const std::filesystem::path lock_path = lock_path_for(identity_path);
-    const std::filesystem::path temp_path = temp_path_for(identity_path);
-
-    int lock_fd = -1;
-    for (int attempt = 0; attempt < 200; ++attempt) {
-        lock_fd = ::open(lock_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (lock_fd >= 0) {
-            break;
-        }
-
-        if (errno != EEXIST) {
-            throw make_error(std::string("failed to acquire identity lock: ") + lock_path.string() + ": " + std::strerror(errno));
-        }
-
-        if (std::filesystem::exists(identity_path)) {
-            return DeviceIdentity(read_file_contents(identity_path));
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    initialize_sodium();
+    const auto path = std::filesystem::absolute(identity_path);
+    const auto name = path.filename().string();
+    if (name.empty() || name == "." || name == "..") throw make_error("invalid identity filename");
+    const auto keys_name = name + ".keys";
+    auto directory = open_identity_directory(path.parent_path());
+    auto lock = acquire_lock(directory.get(), name + ".lock");
+    if (entry_exists(directory.get(), name + ".tmp") || entry_exists(directory.get(), keys_name + ".tmp")) {
+        throw make_error("interrupted identity initialization; restore the complete identity before retrying");
     }
 
-    if (lock_fd < 0) {
-        if (std::filesystem::exists(identity_path)) {
-            return DeviceIdentity(read_file_contents(identity_path));
+    std::string uuid;
+    bool keys_required = false;
+    if (entry_exists(directory.get(), name)) {
+        std::array<unsigned char, 64> contents{};
+        const auto size = read_file(directory.get(), name, contents.data(), contents.size());
+        std::string text(reinterpret_cast<const char*>(contents.data()), size);
+        if (text.size() == UUID_SIZE + IDENTITY_MARKER.size() &&
+            std::string_view(text).substr(UUID_SIZE) == IDENTITY_MARKER) {
+            keys_required = true;
+            text.resize(UUID_SIZE);
+        } else {
+            while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
         }
-
-        throw make_error("timed out waiting for another process to initialize the identity file: " + identity_path.string());
+        if (!is_valid_uuid(text)) throw make_error("invalid UUID or identity format");
+        uuid = std::move(text);
     }
 
-    auto cleanup = [&]() {
-        if (lock_fd >= 0) {
-            ::close(lock_fd);
-            lock_fd = -1;
-        }
-        remove_if_exists(lock_path);
-        remove_if_exists(temp_path);
-    };
-
-    try {
-        if (std::filesystem::exists(identity_path)) {
-            cleanup();
-            return DeviceIdentity(read_file_contents(identity_path));
-        }
-
-        const std::string new_identity = generate_uuid();
-        write_file_contents(temp_path, new_identity);
-
-        std::error_code rename_error;
-        std::filesystem::rename(temp_path, identity_path, rename_error);
-        if (rename_error) {
-            cleanup();
-            if (std::filesystem::exists(identity_path)) {
-                return DeviceIdentity(read_file_contents(identity_path));
-            }
-            throw make_error("failed to persist identity file: " + identity_path.string() + ": " + rename_error.message());
-        }
-
-        cleanup();
-        return DeviceIdentity(new_identity);
-    } catch (...) {
-        cleanup();
-        throw;
+    const bool keys_exist = entry_exists(directory.get(), keys_name);
+    if (keys_exist != keys_required) {
+        throw make_error(keys_required ? "established key material is missing; identity will not be regenerated" :
+                                       "key material has no matching versioned UUID identity");
     }
+
+    PublicKey public_key{};
+    SecretBuffer<crypto_sign_SECRETKEYBYTES> private_key;
+    SecretBuffer<KEY_FILE_SIZE> record;
+    if (keys_required) {
+        if (read_file(directory.get(), keys_name, record.bytes.data(), record.bytes.size()) != KEY_FILE_SIZE ||
+            std::memcmp(record.bytes.data(), KEY_MAGIC.data(), KEY_MAGIC.size()) != 0 ||
+            std::memcmp(record.bytes.data() + KEY_MAGIC.size(), uuid.data(), UUID_SIZE) != 0) {
+            throw make_error("invalid key record format, length, or UUID binding");
+        }
+        std::copy_n(record.bytes.data() + KEY_MAGIC.size() + UUID_SIZE, public_key.size(), public_key.data());
+        std::copy_n(record.bytes.data() + KEY_MAGIC.size() + UUID_SIZE + public_key.size(),
+                    private_key.bytes.size(), private_key.bytes.data());
+        SecretBuffer<crypto_sign_SEEDBYTES> seed;
+        SecretBuffer<crypto_sign_SECRETKEYBYTES> derived_private;
+        PublicKey derived_public{};
+        if (crypto_sign_ed25519_sk_to_seed(seed.bytes.data(), private_key.bytes.data()) != 0 ||
+            crypto_sign_seed_keypair(derived_public.data(), derived_private.bytes.data(), seed.bytes.data()) != 0 ||
+            sodium_memcmp(public_key.data(), derived_public.data(), public_key.size()) != 0 ||
+            sodium_memcmp(private_key.bytes.data(), derived_private.bytes.data(), private_key.bytes.size()) != 0) {
+            throw make_error("corrupt or inconsistent Ed25519 key material");
+        }
+    } else {
+        if (uuid.empty()) uuid = generate_uuid();
+        const auto manifest = uuid + std::string(IDENTITY_MARKER);
+        // Commit the key-required marker before generating any key material.
+        // A crash after this point must fail closed, never generate replacements.
+        atomic_write(directory.get(), name, reinterpret_cast<const unsigned char*>(manifest.data()), manifest.size());
+        if (crypto_sign_keypair(public_key.data(), private_key.bytes.data()) != 0) {
+            throw make_error("Ed25519 key generation failed");
+        }
+        auto* output = record.bytes.data();
+        output = std::copy(KEY_MAGIC.begin(), KEY_MAGIC.end(), output);
+        output = std::copy(uuid.begin(), uuid.end(), output);
+        output = std::copy(public_key.begin(), public_key.end(), output);
+        std::copy(private_key.bytes.begin(), private_key.bytes.end(), output);
+        atomic_write(directory.get(), keys_name, record.bytes.data(), record.bytes.size());
+    }
+    return DeviceIdentity(std::move(uuid), public_key, private_key.bytes);
 }
 
-const std::string& DeviceIdentity::device_id() const {
-    return device_id_;
-}
+const std::string& DeviceIdentity::device_id() const { return device_id_; }
+const DeviceIdentity::PublicKey& DeviceIdentity::public_key() const { return public_key_; }
+const DeviceIdentity::PrivateKey& DeviceIdentity::private_key() const { return private_key_; }
 
 } // namespace gasoline

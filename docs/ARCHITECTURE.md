@@ -168,9 +168,55 @@ Each device is identified by:
 The registry provides thread-safe add/remove/list operations for device management.
 
 ## Device Identity
-Every Gasoline installation has a persistent randomly generated device ID stored locally under the user configuration directory, currently `~/.config/gasoline/device_id` on Linux.
-The identifier survives daemon restarts and is used as a logical device identity, not as authentication proof.
-Possession of the ID alone must not be treated as proof that a remote peer is trusted.
+`DeviceIdentity` owns the persistent UUID and a long-term Ed25519 keypair. Build
+dependencies now include libsodium development headers/library and pkg-config.
+Libsodium supplies key generation, UUID randomness, key consistency checks, and
+secret-buffer clearing; no cryptographic primitives are implemented locally.
+
+Linux storage remains in `~/.config/gasoline`, secured to mode `0700`:
+
+- `device_id`: UUID on the first line, `ed25519-v1` on the second, final newline.
+- `device_id.keys`: a 152-byte binary record: ASCII `GASOLINE-ED25519-V1\n`
+  (20 bytes), the matching ASCII UUID (36), public key (32), and libsodium
+  Ed25519 secret key (64, seed plus public key). This entire file is secret.
+- `device_id.lock`: persistent advisory lock file; the kernel releases the lock
+  when its process exits. All three files use mode `0600`.
+
+A legacy UUID-only file receives its first keypair without changing the UUID
+value. The key-required marker is committed before key generation. Once marked,
+missing keys never trigger regeneration. Loads check exact record size, UUID
+binding, and both key components against a keypair derived from the stored seed.
+Unreadable, malformed, symlinked, multiply linked, foreign-owned, or incorrectly
+permissioned identity/key files cause an explicit exception. The identity
+directory must be owned by the current user and must not itself be a symlink.
+
+Writes retain the existing temporary-file/rename approach, adding exclusive
+creation, file and directory fsync, and serialization with `flock`. A leftover
+`.tmp` file or an incomplete marked identity fails closed, including on repeated
+attempts. Recovery requires restoring the complete matching identity from a
+trusted backup, not deleting keys and restarting. Back up both identity files
+together. Do not run older UUID-only binaries against the migrated format or
+concurrently with this version. Complete storage deletion or rollback to a
+UUID-only backup cannot be distinguished from first initialization.
+
+`get_my_device_id()` remains compatible. `get_my_device_identity()` returns the
+same process-wide immutable identity; its `device_id()`, `public_key()`, and
+`private_key()` accessors return const references. Identity objects cannot be
+copied; references must not outlive their owning object. Temporary secret buffers
+and the object's private key are cleared on destruction. Key bytes are not
+logged, transmitted, or exposed by the control API.
+
+This milestone only provides local key storage: on-disk secrets are protected by
+filesystem permissions, not encryption or an OS keystore, and memory is not
+locked against swapping or crash dumps. Root and processes running as the same
+user remain inside the trust boundary. The filesystem adapter still uses the
+existing Linux/POSIX approach; other platforms will need equivalent persistence.
+Network identity is still the UUID alone, not authentication proof. No protocol,
+pairing, authentication, or encryption changes are included.
+
+`identity_tests` uses temporary directories and fresh child processes to cover
+persistence, migration, permissions, corruption, interrupted writes, and
+concurrent initialization without accessing the user's actual identity.
 
 ---
 

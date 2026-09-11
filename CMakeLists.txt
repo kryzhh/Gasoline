@@ -4,6 +4,9 @@ project(gasoline)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+
 # Include directories
 include_directories(
     .
@@ -60,6 +63,7 @@ add_executable(gasoline
 
 # Link Avahi (Linux discovery)
 target_link_libraries(gasoline
+    PkgConfig::SODIUM
     avahi-client
     avahi-common
     pthread
@@ -67,6 +71,16 @@ target_link_libraries(gasoline
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(identity_tests
+        tests/identity_tests.cpp
+        core/identity/device_identity.cpp
+    )
+    target_link_libraries(identity_tests PkgConfig::SODIUM pthread)
+    # Observe/inject fsync calls in identity tests without production test hooks.
+    set_property(TARGET identity_tests APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--wrap=fsync")
+    add_test(NAME identity_tests COMMAND identity_tests)
+    set_tests_properties(identity_tests PROPERTIES TIMEOUT 30)
+
     add_executable(session_tests
         tests/session_tests.cpp
         core/networking/connection.cpp
