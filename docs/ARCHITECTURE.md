@@ -220,16 +220,124 @@ concurrent initialization without accessing the user's actual identity.
 
 ---
 
-# Device Pairing
-Gasoline supports multiple devices within the same environment.
-A device must be paired before it is allowed to exchange data.
-Pairing ensures that only trusted devices can communicate.
-The pairing process typically involves:
+## Persistent Trust Storage
+`core/trust/TrustStore` is a standalone storage/model foundation, not part of
+`DeviceRegistry`. The daemon does not open it or consult it yet:
+
+- `DiscoveredDevice` holds temporary discovery metadata, including an address.
+- `Connection` owns a live session; `DeviceRegistry` tracks those sessions.
+  Existing sessions are still unauthenticated, including READY sessions.
+- `TrustedDevice` is a persistent local UUID/public-key trust decision. Neither
+  discovery nor connection registration can create or reactivate this record.
+
+The Linux database is `$XDG_STATE_HOME/gasoline/trust.sqlite3` when that variable
+is an absolute path, otherwise `~/.local/state/gasoline/trust.sqlite3` (home is
+resolved through the user database, as with identity). This is separate from
+`~/.config/gasoline/device_id.keys`; local private keys never enter SQLite.
+An explicit database path supports isolated tests and must name a file in a
+dedicated application directory, since that directory is secured to `0700`.
+
+The main database is exclusively created with mode `0600`; SQLite's Linux/Unix
+VFS creates WAL, shared-memory, and journal files with matching permissions.
+Existing database/sidecar files must be regular, single-link, user-owned `0600`
+files, not symlinks. Checks run on opening and before data operations. The
+initialization lock is also `0600`. Ancestor directories are fsynced before
+database initialization, and the containing directory after initialization.
+No process-wide umask changes are made. SQLite temporary storage is in memory.
+
+### Schema
+UUIDs and attempt IDs are 16-byte BLOBs; public keys are 32-byte BLOBs. The C++ API
+uses fixed-size arrays with checked text-UUID/binary-public-key conversion.
+SQLite STRICT tables and length checks enforce the corresponding stored types
+and sizes. Key lengths are validated here, not possession or peer authenticity.
+
+- `trusted_devices`: UUID primary key; globally unique public key, including
+  revoked records; ACTIVE/REVOKED status; positive trust revision; local alias;
+  untrusted peer-reported name/platform; pairing method; paired, revoked, and
+  last-authenticated timestamps (UTC Unix seconds). Timestamp/status consistency
+  and text lengths have CHECK constraints.
+- `device_permissions`: `(device_uuid, permission)` primary key, with a foreign
+  key and cascading deletion. Permission names are bounded opaque capability
+  names, not an implemented feature/authorization policy.
+- `pairing_attempts`: attempt UUID primary key; peer UUID/public key; revision;
+  PENDING/CONFIRMED/CANCELLED/EXPIRED status; separate local/peer confirmation
+  flags; creation/update/expiry timestamps. CONFIRMED requires both flags.
+- `pairing_attempt_permissions`: proposed permissions keyed by
+  `(attempt_id, permission)`, with a cascading attempt foreign key.
+
+Attempts intentionally do not require an existing trusted-device record. Multiple
+attempts may concern one peer. They contain no live session handles, transport
+addresses, private keys, traffic keys, or confirmation secrets. Confirmation
+flags are stored state only, never evidence that authentication succeeded.
+
+### Transactions And API
+Construction opens/initializes and migrates the database. Application ID `GSTR`
+and `PRAGMA user_version` identify the schema. Migration 1 creates trusted devices
+and permissions; migration 2 adds attempt tables. All required schema changes,
+application ID, and version updates commit together in one transaction. A private
+advisory lock serializes initialization across instances/processes. Existing
+unversioned/unrecognized databases and newer schemas are rejected, not adopted.
+
+Each connection uses `foreign_keys=ON`, WAL, `synchronous=FULL`, FULLMUTEX, a
+five-second busy timeout, defensive mode, and `trusted_schema=OFF`. The build and
+runtime require thread-safe SQLite >= 3.37.0, which is the baseline required for
+STRICT table support and modern security pragmas. While SQLite 3.51.3 (and backports
+3.44.6 and 3.50.7) fixed the [WAL-reset corruption bug](https://www.sqlite.org/wal.html#the_wal_reset_bug)
+under concurrent manual checkpointing, TrustStore does not perform manual checkpoints,
+serializes writes, and does not require 3.51.3-specific SQL features; environments
+subject to concurrent external WAL checkpointing should deploy patched SQLite builds.
+A per-instance mutex serializes operations; SQLite serializes writes across
+instances/processes. Callers must keep the TrustStore alive until all users finish
+and open a new connection after fork rather than use an inherited connection.
+
+The small API provides `insert_device`, `find_device`, `find_by_public_key`,
+`update_device`, `revoke_device`, `state`, `permissions`, attempt CRUD, and a
+read-only configuration snapshot. Raw SQLite handles never leave the implementation.
+All writes use `BEGIN IMMEDIATE` transactions, including permission replacement.
+Device/attempt snapshot reads use read transactions. Updates require an expected
+revision and advance it by exactly one; stale revisions fail without partial
+updates. Device UUID/public key and attempt identity binding are immutable.
+Revoke increments the revision and clears permissions atomically. Only an explicit
+local `update_device` can reactivate a revoked record; there is no automatic path.
+
+`state` distinguishes UNKNOWN, PAIRING_PENDING, ACTIVE, and REVOKED, with a stored
+trust decision taking precedence over attempts. PENDING and CONFIRMED attempts
+without a trust record remain PAIRING_PENDING and never grant permissions.
+`permissions` returns only effective permissions for ACTIVE records; all other
+states return none. Future authentication must compare the stored public key and
+trust status, not authorize by UUID or permissions alone.
+
+Open, integrity-check, schema, permission, busy, and constraint errors are explicit
+exceptions. SQLite errors retain their result codes. Transactions roll back on
+failure; migrations never drop/recreate established trust state. Empty/truncated
+existing databases, missing databases with recovery sidecars, or interrupted
+initialization are rejected for manual recovery. Normal committed-WAL recovery
+is left to SQLite. Backups must use SQLite's backup facilities or copy a quiesced
+database together with any WAL; never discard WAL to make an open succeed.
+
+This is plaintext, permission-protected local storage, not protection against
+root, same-user tampering, backup rollback, or complete deletion of all database
+state. Use a local filesystem with working SQLite locks/fsync, not a network
+filesystem. There is no automatic attempt expiry/cleanup, trust promotion,
+pairing protocol, authentication, or authorization enforcement yet. The stored
+expiry time is metadata until later policy explicitly updates/deletes attempts.
+
+`trust_store_tests` exercises schema upgrades/rollback, constraints, state and
+permission isolation, revisions, concurrency, private files, and WAL recovery
+entirely in temporary directories. It never loads the real local identity or
+starts discovery, connections, or pairing.
+
+---
+
+# Device Pairing (Planned)
+Gasoline supports multiple devices within the same environment. Pairing and
+authenticated access are planned; the storage foundation above does not enforce
+them on current sessions. The future pairing process will involve:
 1. Device discovery
 2. Pair request
 3. User confirmation
 4. Trust establishment
-Trusted devices are stored locally and reused for future sessions.
+Trusted devices will be stored locally and checked during future authenticated sessions.
 
 ---
 

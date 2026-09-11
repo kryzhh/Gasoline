@@ -6,6 +6,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+# Requires SQLite >= 3.37.0 for STRICT table support and modern security pragmas.
+# Note: Upstream SQLite 3.51.3 (and backports 3.44.6 / 3.50.7) fixed the WAL-reset
+# bug under concurrent manual checkpointing, but TrustStore only requires 3.37.0+
+# for its feature baseline as it serializes writes and does not manually checkpoint.
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3>=3.37.0)
+
+add_library(gasoline_trust core/trust/trust_store.cpp)
+target_include_directories(gasoline_trust PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(gasoline_trust PRIVATE PkgConfig::SQLITE3 pthread)
 
 # Include directories
 include_directories(
@@ -63,6 +72,7 @@ add_executable(gasoline
 
 # Link Avahi (Linux discovery)
 target_link_libraries(gasoline
+    gasoline_trust
     PkgConfig::SODIUM
     avahi-client
     avahi-common
@@ -71,6 +81,11 @@ target_link_libraries(gasoline
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(trust_store_tests tests/trust_store_tests.cpp)
+    target_link_libraries(trust_store_tests gasoline_trust PkgConfig::SQLITE3 pthread)
+    add_test(NAME trust_store_tests COMMAND trust_store_tests)
+    set_tests_properties(trust_store_tests PROPERTIES TIMEOUT 60)
+
     add_executable(identity_tests
         tests/identity_tests.cpp
         core/identity/device_identity.cpp
