@@ -16,6 +16,9 @@ add_library(gasoline_trust core/trust/trust_store.cpp)
 target_include_directories(gasoline_trust PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gasoline_trust PRIVATE PkgConfig::SQLITE3 pthread)
 
+add_library(gasoline_protocol_v2 core/protocol/v2_framing.cpp)
+target_include_directories(gasoline_protocol_v2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Include directories
 include_directories(
     .
@@ -73,6 +76,7 @@ add_executable(gasoline
 # Link Avahi (Linux discovery)
 target_link_libraries(gasoline
     gasoline_trust
+    gasoline_protocol_v2
     PkgConfig::SODIUM
     avahi-client
     avahi-common
@@ -112,7 +116,12 @@ if(BUILD_TESTING)
         core/utils/packet_monitor.cpp
         services/message_service.cpp
     )
-    target_link_libraries(session_tests pthread)
+    target_link_libraries(session_tests gasoline_protocol_v2 pthread)
     add_test(NAME session_tests COMMAND session_tests)
     set_tests_properties(session_tests PROPERTIES TIMEOUT 60)
+
+    add_executable(v2_framing_tests tests/v2_framing_tests.cpp)
+    target_link_libraries(v2_framing_tests gasoline_protocol_v2)
+    add_test(NAME v2_framing_tests COMMAND v2_framing_tests)
+    set_tests_properties(v2_framing_tests PROPERTIES TIMEOUT 30)
 endif()

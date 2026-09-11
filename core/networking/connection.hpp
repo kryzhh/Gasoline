@@ -10,6 +10,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "../protocol/v2_framing.hpp"
+
 namespace gasoline {
 
 class Connection : public std::enable_shared_from_this<Connection> {
@@ -35,13 +37,16 @@ public:
 private:
     explicit Connection(int socket_fd, Role role);
 
-    void send_hello();
+    ssize_t send_preface();
+    bool accept_peer_preface();
+    ssize_t send_initial_hello();
+    ssize_t send_packet_locked(const nlohmann::json& packet);
     void receive_loop();
-    bool handle_frame();
+    bool handle_record(std::string_view payload);
     void finalize_disconnect(const std::string& reason);
     ssize_t send_all(const std::string& data);
 
-    static constexpr size_t MAX_FRAME_SIZE = 65536;
+    static constexpr size_t MAX_CONTROL_RECORD_SIZE = 4096;
 
     const int socket_fd_;
     const uint64_t session_id_;
@@ -51,11 +56,14 @@ private:
     std::atomic<bool> stopping_{false};
     std::atomic<bool> cleaned_up_{false};
     std::atomic<bool> ready_{false};
+    std::atomic<bool> peer_preface_received_{false};
+    std::atomic<bool> application_records_enabled_{false};
     std::mutex write_mutex_;
     std::mutex socket_mutex_;
+    bool local_preface_sent_{false}; // Guarded by write_mutex_.
     bool peer_hello_received_{false};
     std::string peer_device_id_;
-    std::string incoming_buffer_;
+    protocol_v2::RecordParser record_parser_;
 };
 
 } // namespace gasoline

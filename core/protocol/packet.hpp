@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <string_view>
 #include <nlohmann/json.hpp>
 
 // Defining packet structure
@@ -15,8 +16,9 @@ struct Packet {
 
 };
 
-Packet parse_packet(const std::string& data);
+Packet parse_packet(std::string_view data);
 
+// Serializes only the protocol payload. Transport framing is handled separately.
 std::string serialize_packet(const Packet& pkt);
 
 }

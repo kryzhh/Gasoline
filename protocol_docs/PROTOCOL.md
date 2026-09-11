@@ -21,7 +21,37 @@ The protocol is designed to be:
 Gasoline uses persistent TCP connections between devices.
 Each device runs a Gasoline daemon that listens on a predefined port.
 Port: 42666
-When a device connects, both sides exchange protocol messages using JSON packets.
+When a device connects, both sides speak the explicitly incompatible protocol v2
+wire format. There is no protocol v1 or newline-delimited plaintext fallback.
+
+## Protocol v2 Preface
+
+Each direction begins with exactly ten bytes before its first record:
+
+```
+47 41 53 4f 4c 49 4e 45 00 02
+ G  A  S  O  L  I  N  E   v2
+```
+
+The first eight bytes are the ASCII magic `GASOLINE`; the final two bytes are the
+unsigned network-order protocol version, currently 2. A missing, malformed, or
+unsupported preface terminates the session. The preface occurs once per direction.
+Both endpoints send the preface first and validate the peer preface before either
+endpoint sends its first framed record.
+
+## Protocol v2 Records
+
+After the preface, every record consists of a two-byte unsigned network-order
+payload length followed by exactly that many payload bytes. Lengths from 0 through
+65,535 are valid at the framing layer. Empty records are therefore representable,
+although the current JSON protocol rejects them as invalid application payloads.
+`hello`, `ping`, and `pong` JSON records have an additional 4,096-byte limit.
+
+The framing parser validates the complete length before reserving payload storage,
+handles arbitrary stream fragmentation and multiple records per read, and treats
+EOF in a preface, header, or payload as truncation. Framing produces opaque record
+payload bytes; JSON parsing is a separate layer above it so future encrypted record
+payloads do not require a new transport parser.
 
 ---
 
@@ -231,15 +261,13 @@ The persistent device ID introduced in the core does not replace pairing, trust 
 
 ---
 
-# Protocol Versioning (Planned)
-Future protocol changes may introduce versioning.
-Example:
-```json
-{
- "protocol_version": 1
-}
-```
-This allows backward compatibility as the protocol evolves.
+# Protocol Versioning
+
+The binary preface carries the wire version. Version 2 endpoints accept only the
+exact version-2 preface and never probe for or downgrade to the former
+newline-delimited JSON format.
+Wire-version changes are intentionally incompatible; compatibility requires an
+explicitly separate endpoint or protocol implementation.
 
 ---
 

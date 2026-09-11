@@ -75,10 +75,17 @@ identity, malformed JSON, and packets before the first hello close the session.
 Message handling after hello is unchanged, but messages do not complete or extend
 the handshake. These checks enforce protocol order, not authentication.
 
-Newline-delimited JSON framing is unchanged. Each frame is limited to 65,536
-bytes excluding the newline, checked before appending to the receive buffer,
-whether or not the terminating newline has arrived. The same limit applies to
-outgoing frames. Fragmented and coalesced frames remain supported.
+Protocol v2 is an incompatible binary-framed transport. Each direction starts
+with the ten-byte preface `GASOLINE 00 02` (eight ASCII magic bytes followed by
+the network-order version 2). Both sides send and validate this preface before
+either sends a framed record. Records use a two-byte unsigned
+network-order length followed by exactly that many payload bytes. Record payloads
+are limited to 65,535 bytes; setup/control JSON records (`hello`, `ping`, and
+`pong`) are additionally limited to 4,096 bytes. The standalone v2 parser owns
+preface and record reassembly, while `Packet` owns JSON parsing and schema checks.
+It supports fragmented and coalesced records and rejects malformed/truncated
+streams. A v1 newline-delimited JSON peer fails the preface check; there is no
+protocol downgrade or plaintext fallback.
 
 Duplicate arbitration and registration occur under one registry lock. The
 connection initiated by the lower UUID is preferred when opposite directions

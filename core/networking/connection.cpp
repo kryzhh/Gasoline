@@ -4,6 +4,7 @@
 #include "../device/device_registry.hpp"
 #include "../utils/device_id.hpp"
 #include "../protocol/packet.hpp"
+#include "../protocol/v2_framing.hpp"
 #include "../protocol/router/packet_router.hpp"
 #include "../utils/logger.hpp"
 #include "../utils/packet_monitor.hpp"
@@ -33,7 +34,7 @@ std::atomic<uint64_t> next_session_id{1};
 class BoundedPacketBuffer : public std::streambuf {
 public:
     BoundedPacketBuffer(std::string& data, size_t limit) : data_(data), limit_(limit) {
-        data_.reserve(limit + 1); // Includes space for the framing newline.
+        data_.reserve(limit);
     }
 
 protected:
@@ -79,6 +80,19 @@ int wait_for_socket(int fd, short events, Clock::time_point deadline) {
     }
 }
 
+bool is_control_record(const nlohmann::json& packet) {
+    const auto type = packet.find("type");
+    if (type == packet.end() || !type->is_string()) {
+        return false;
+    }
+    const auto& value = type->get_ref<const std::string&>();
+    return value == "hello" || value == "ping" || value == "pong";
+}
+
+bool is_control_record(const Packet& packet) {
+    return packet.type == "hello" || packet.type == "ping" || packet.type == "pong";
+}
+
 } // namespace
 
 std::shared_ptr<Connection> Connection::create(int socket_fd, Role role) {
@@ -109,15 +123,52 @@ bool Connection::mark_ready() {
     return true;
 }
 
-void Connection::send_hello() {
+ssize_t Connection::send_initial_hello() {
     nlohmann::json pkt;
     pkt["type"] = "hello";
     pkt["device_id"] = get_my_device_id();
     pkt["payload"]["device_name"] = "Gasoline";
     pkt["payload"]["device_type"] = "linux";
-    if (send_packet(pkt) < 0) {
-        request_disconnect("hello send failed");
+
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (stopping_.load() || !local_preface_sent_) {
+        return -1;
     }
+    const ssize_t result = send_packet_locked(pkt);
+    if (result >= 0) {
+        // Publishing this while still holding write_mutex_ guarantees that every
+        // later successful send is ordered after the complete hello record.
+        application_records_enabled_.store(true);
+    }
+    return result;
+}
+
+ssize_t Connection::send_preface() {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (stopping_.load()) {
+        return -1;
+    }
+    if (local_preface_sent_) {
+        return 0;
+    }
+    const auto preface = protocol_v2::preface_bytes();
+    const ssize_t result = send_all(std::string(preface.data(), preface.size()));
+    if (result < 0) {
+        request_disconnect("protocol v2 preface send failed or timed out");
+        return -1;
+    }
+    local_preface_sent_ = true;
+    return result;
+}
+
+bool Connection::accept_peer_preface() {
+    bool expected = false;
+    if (peer_preface_received_.compare_exchange_strong(expected, true)) {
+        if (send_initial_hello() < 0) {
+            request_disconnect("hello send failed");
+        }
+    }
+    return !stopping_.load();
 }
 
 void Connection::start() {
@@ -129,8 +180,9 @@ void Connection::start() {
         // The worker owns a strong reference until receive and cleanup finish.
         std::thread([self = shared_from_this()]() {
             try {
-                self->send_hello();
-                self->receive_loop();
+                if (self->send_preface() >= 0) {
+                    self->receive_loop();
+                }
             } catch (const std::exception& e) {
                 log(std::string("Session worker failed: ") + e.what());
             } catch (...) {
@@ -156,11 +208,17 @@ void Connection::request_disconnect(const std::string& reason) {
 
 ssize_t Connection::send_packet(const nlohmann::json& packet) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    if (stopping_.load()) {
+    if (stopping_.load() || !application_records_enabled_.load()) {
         return -1;
     }
+    return send_packet_locked(packet);
+}
+
+ssize_t Connection::send_packet_locked(const nlohmann::json& packet) {
     std::string data;
-    BoundedPacketBuffer buffer(data, MAX_FRAME_SIZE);
+    const size_t limit = is_control_record(packet) ? MAX_CONTROL_RECORD_SIZE :
+                                                     protocol_v2::MAX_RECORD_SIZE;
+    BoundedPacketBuffer buffer(data, limit);
     std::ostream output(&buffer);
     // Stop serialization on the first overflow; never send a partial frame.
     output.exceptions(std::ios::badbit | std::ios::failbit);
@@ -169,9 +227,9 @@ ssize_t Connection::send_packet(const nlohmann::json& packet) {
     } catch (const std::length_error&) {
         return -1;
     }
-    data.push_back('\n');
+    std::string wire_record = protocol_v2::encode_record(data);
     log_tx(std::to_string(session_id_), packet.value("type", "unknown"));
-    const ssize_t result = send_all(data);
+    const ssize_t result = send_all(wire_record);
     if (result < 0) {
         request_disconnect("send failed or timed out");
     }
@@ -220,7 +278,7 @@ void Connection::finalize_disconnect(const std::string& reason) {
     }
 }
 
-bool Connection::handle_frame() {
+bool Connection::handle_record(std::string_view payload) {
     if (stopping_.load()) {
         return false;
     }
@@ -228,8 +286,16 @@ bool Connection::handle_frame() {
         request_disconnect("handshake timeout");
         return false;
     }
+    if (!peer_hello_received_ && payload.size() > MAX_CONTROL_RECORD_SIZE) {
+        request_disconnect("oversized setup record");
+        return false;
+    }
     try {
-        const Packet pkt = parse_packet(incoming_buffer_);
+        const Packet pkt = parse_packet(payload);
+        if (is_control_record(pkt) && payload.size() > MAX_CONTROL_RECORD_SIZE) {
+            request_disconnect("oversized control record");
+            return false;
+        }
         if ((pkt.type == "hello" && peer_hello_received_) ||
             (pkt.type != "hello" && !peer_hello_received_) ||
             (peer_hello_received_ && pkt.device_id != peer_device_id_)) {
@@ -269,30 +335,33 @@ void Connection::receive_loop() {
         if (bytes < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
             continue;
         }
-        if (bytes <= 0) {
-            request_disconnect(bytes == 0 ? "peer closed connection" : "receive error");
+        if (bytes < 0) {
+            request_disconnect("receive error");
+            break;
+        }
+        if (bytes == 0) {
+            try {
+                record_parser_.finish();
+                request_disconnect("peer closed connection");
+            } catch (const protocol_v2::FramingError& e) {
+                log(std::string("Invalid protocol v2 EOF: ") + e.what());
+                request_disconnect("truncated protocol v2 stream");
+            }
             break;
         }
 
-        // Bound each frame before appending, including frames whose delimiter
-        // arrives in this read. Coalesced frames each receive their own limit.
-        std::string_view chunk(buffer, static_cast<size_t>(bytes));
-        while (!chunk.empty() && !stopping_.load()) {
-            const auto newline = chunk.find('\n');
-            const auto length = newline == std::string_view::npos ? chunk.size() : newline;
-            if (length > MAX_FRAME_SIZE - incoming_buffer_.size()) {
-                request_disconnect("oversized frame");
-                break;
+        try {
+            record_parser_.consume(
+                std::string_view(buffer, static_cast<size_t>(bytes)),
+                [this](std::string_view payload) {
+                    return accept_peer_preface() && handle_record(payload);
+                });
+            if (record_parser_.preface_complete() && !stopping_.load()) {
+                accept_peer_preface();
             }
-            incoming_buffer_.append(chunk.data(), length);
-            if (newline == std::string_view::npos) {
-                break;
-            }
-            if (!handle_frame()) {
-                break;
-            }
-            incoming_buffer_.clear();
-            chunk.remove_prefix(length + 1);
+        } catch (const protocol_v2::FramingError& e) {
+            log(std::string("Invalid protocol v2 framing: ") + e.what());
+            request_disconnect("invalid protocol v2 framing");
         }
     }
 }

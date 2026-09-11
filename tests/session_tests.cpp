@@ -4,6 +4,7 @@
 #include "core/device/device_registry.hpp"
 #include "core/events/event_bus.hpp"
 #include "core/protocol/handlers/hello_handler.hpp"
+#include "core/protocol/v2_framing.hpp"
 #include "services/message_service.hpp"
 
 #include <poll.h>
@@ -32,7 +33,8 @@ using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 using json = nlohmann::json;
 const std::string PEER_ID = "f0000000-0000-4000-8000-000000000000";
-constexpr size_t FRAME_LIMIT = 65536;
+constexpr size_t FRAME_LIMIT = protocol_v2::MAX_RECORD_SIZE;
+constexpr size_t CONTROL_LIMIT = 4096;
 
 static_assert(!std::is_invocable_v<decltype(&gasoline::send_packet), int, const json&>,
               "Sending by file descriptor must not be possible");
@@ -66,8 +68,11 @@ struct Peer {
     int fd = -1;
     std::shared_ptr<Connection> connection;
     std::string input;
+    bool sent_preface = false;
+    bool received_preface = false;
 
-    explicit Peer(Connection::Role role = Connection::Role::Incoming, int reuse_fd = -1, bool start = true) {
+    explicit Peer(Connection::Role role = Connection::Role::Incoming, int reuse_fd = -1,
+                  bool start = true, bool negotiate_v2 = true) {
         int sockets[2];
         require(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0, "socketpair failed");
         if (reuse_fd >= 0 && sockets[0] != reuse_fd) {
@@ -83,7 +88,12 @@ struct Peer {
         connection = Connection::create(sockets[0], role);
         if (start) {
             connection->start();
-            require(read_packet()["type"] == "hello", "missing symmetric local hello");
+            if (negotiate_v2) {
+                send_preface();
+                require(read_packet()["type"] == "hello", "missing symmetric local hello");
+            } else {
+                read_preface();
+            }
         }
     }
 
@@ -119,11 +129,31 @@ struct Peer {
         return true;
     }
 
-    void send(const json& value) { require(write(value.dump() + "\n"), "test peer send failed"); }
+    void send_preface() {
+        if (sent_preface) {
+            return;
+        }
+        const auto bytes = protocol_v2::preface_bytes();
+        require(write(std::string(bytes.data(), bytes.size())), "test peer preface send failed");
+        sent_preface = true;
+    }
 
-    json read_packet() {
+    void send_payload(std::string_view payload) {
+        std::string wire;
+        if (!sent_preface) {
+            const auto bytes = protocol_v2::preface_bytes();
+            wire.append(bytes.data(), bytes.size());
+        }
+        wire += protocol_v2::encode_record(payload);
+        require(write(wire), "test peer send failed");
+        sent_preface = true;
+    }
+
+    void send(const json& value) { send_payload(value.dump()); }
+
+    void fill_input(size_t required) {
         const auto deadline = Clock::now() + 2s;
-        while (input.find('\n') == std::string::npos) {
+        while (input.size() < required) {
             require(Clock::now() < deadline, "test peer receive timed out");
             pollfd descriptor{fd, POLLIN, 0};
             if (::poll(&descriptor, 1, 20) <= 0) {
@@ -134,9 +164,28 @@ struct Peer {
             require(count > 0, "unexpected disconnect");
             input.append(data, static_cast<size_t>(count));
         }
-        const auto newline = input.find('\n');
-        const auto result = json::parse(input.substr(0, newline));
-        input.erase(0, newline + 1);
+    }
+
+    void read_preface() {
+        if (!received_preface) {
+            fill_input(protocol_v2::PREFACE_SIZE);
+            const auto expected = protocol_v2::preface_bytes();
+            require(input.compare(0, expected.size(), expected.data(), expected.size()) == 0,
+                    "invalid local protocol v2 preface");
+            input.erase(0, expected.size());
+            received_preface = true;
+        }
+    }
+
+    json read_packet() {
+        read_preface();
+        fill_input(protocol_v2::RECORD_HEADER_SIZE);
+        const size_t length = (static_cast<unsigned char>(input[0]) << 8) |
+                              static_cast<unsigned char>(input[1]);
+        fill_input(protocol_v2::RECORD_HEADER_SIZE + length);
+        const auto result = json::parse(input.begin() + protocol_v2::RECORD_HEADER_SIZE,
+                                        input.begin() + protocol_v2::RECORD_HEADER_SIZE + length);
+        input.erase(0, protocol_v2::RECORD_HEADER_SIZE + length);
         return result;
     }
 
@@ -276,8 +325,8 @@ void malformed_hello_rejection() {
             "hello handler accepted the wrong packet type");
 }
 
-std::string padded_ping(size_t length) {
-    auto value = packet("ping");
+std::string padded_packet(const std::string& type, size_t length) {
+    auto value = packet(type);
     value["padding"] = "";
     value["padding"] = std::string(length - value.dump().size(), 'x');
     const auto frame = value.dump();
@@ -288,26 +337,130 @@ std::string padded_ping(size_t length) {
 void frame_boundaries() {
     {
         Peer peer;
-        const auto greeting = hello().dump();
-        require(peer.write(greeting.substr(0, 7)), "fragment send failed");
-        require(peer.write(greeting.substr(7) + "\n" + packet("ping").dump() + "\n"), "coalesced send failed");
+        peer.send_preface();
+        const auto greeting = protocol_v2::encode_record(hello().dump());
+        require(peer.write(greeting.substr(0, 1)), "split header send failed");
+        require(peer.write(greeting.substr(1, 8)), "split payload send failed");
+        require(peer.write(greeting.substr(9) + protocol_v2::encode_record(packet("ping").dump())),
+                "coalesced send failed");
         require(peer.read_packet()["type"] == "ping", "fragmented hello failed");
         require(peer.read_packet()["type"] == "pong", "coalesced ping failed");
-        const auto boundary = padded_ping(FRAME_LIMIT);
-        require(peer.write(boundary), "boundary send failed");
-        require(peer.write("\n" + boundary + "\n"), "boundary delimiter send failed");
-        require(peer.read_packet()["type"] == "pong", "exact-size frame rejected");
-        require(peer.read_packet()["type"] == "pong", "coalesced exact-size frame rejected");
-    }
-    for (bool terminated : {false, true}) {
-        Peer peer;
-        peer.ready();
-        peer.write(padded_ping(FRAME_LIMIT + 1) + (terminated ? "\n" : ""));
-        peer.closed();
+        const auto boundary = padded_packet("unknown", FRAME_LIMIT);
+        const auto encoded_boundary = protocol_v2::encode_record(boundary);
+        require(peer.write(encoded_boundary.substr(0, protocol_v2::RECORD_HEADER_SIZE)),
+                "boundary header send failed");
+        require(peer.write(encoded_boundary.substr(protocol_v2::RECORD_HEADER_SIZE) + encoded_boundary),
+                "boundary payload/coalesced send failed");
+        peer.send(packet("ping"));
+        require(peer.read_packet()["type"] == "pong",
+                "exact-size or coalesced record stopped the session");
     }
     Peer invalid;
-    invalid.write("{broken-json}\n");
+    invalid.send_payload("{broken-json}");
     invalid.closed();
+}
+
+void incompatible_v1_and_bad_preface() {
+    {
+        Peer peer(Connection::Role::Incoming, -1, true, false);
+        require(peer.connection->send_packet(packet("ping")) == -1,
+                "record send succeeded before peer v2 preface validation");
+        pollfd descriptor{peer.fd, POLLIN, 0};
+        require(peer.input.empty() && ::poll(&descriptor, 1, 20) == 0,
+                "framed record was sent before peer v2 preface validation");
+        require(peer.write(hello().dump() + "\n"), "v1 input send failed");
+        peer.closed();
+    }
+    {
+        Peer peer(Connection::Role::Incoming, -1, true, false);
+        auto bad = std::string(protocol_v2::preface_bytes());
+        bad.back() = 1;
+        require(peer.write(bad), "bad preface send failed");
+        peer.closed();
+    }
+}
+
+void initial_hello_wins_send_race() {
+    for (int iteration = 0; iteration < 25; ++iteration) {
+        Peer peer(Connection::Role::Incoming, -1, true, false);
+        auto racing_send = std::async(std::launch::async, [connection = peer.connection] {
+            const auto deadline = Clock::now() + 2s;
+            const auto message = packet("message");
+            for (;;) {
+                const ssize_t result = connection->send_packet(message);
+                if (result >= 0) {
+                    return result;
+                }
+                require(!connection->is_stopping() && Clock::now() < deadline,
+                        "racing application send never became enabled");
+                std::this_thread::yield();
+            }
+        });
+        peer.send_preface();
+        require(peer.read_packet()["type"] == "hello",
+                "racing application record preceded the initial hello");
+        require(peer.read_packet()["type"] == "message",
+                "racing application record was missing after the initial hello");
+        require(racing_send.get() > 0, "racing application send failed");
+    }
+}
+
+void connection_eof_and_zero_length_records() {
+    {
+        Peer peer(Connection::Role::Incoming, -1, true, false);
+        const auto bytes = protocol_v2::preface_bytes();
+        require(peer.write(std::string(bytes.substr(0, 4))), "partial preface send failed");
+        require(::shutdown(peer.fd, SHUT_WR) == 0, "partial preface shutdown failed");
+        peer.closed();
+    }
+    {
+        Peer peer;
+        require(peer.write(std::string("\x00", 1)), "one-byte header send failed");
+        require(::shutdown(peer.fd, SHUT_WR) == 0, "partial header shutdown failed");
+        peer.closed();
+    }
+    {
+        Peer peer;
+        require(peer.write(std::string("\x00\x05", 2) + "abc"), "partial payload send failed");
+        require(::shutdown(peer.fd, SHUT_WR) == 0, "partial payload shutdown failed");
+        peer.closed();
+    }
+    {
+        Peer peer;
+        require(peer.write(protocol_v2::encode_record("")), "zero-length record send failed");
+        peer.closed();
+    }
+}
+
+void control_record_limits() {
+    {
+        Peer peer;
+        peer.ready();
+        peer.send_payload(padded_packet("ping", CONTROL_LIMIT));
+        require(peer.read_packet()["type"] == "pong", "exact control-record limit was rejected");
+        peer.send_payload(padded_packet("ping", CONTROL_LIMIT + 1));
+        peer.closed();
+    }
+    {
+        Peer peer;
+        peer.send_payload(padded_packet("hello", CONTROL_LIMIT + 1));
+        peer.closed();
+    }
+    {
+        Peer peer;
+        peer.ready();
+        const auto boundary = json::parse(padded_packet("ping", CONTROL_LIMIT));
+        auto sending = std::async(std::launch::async,
+                                  [&] { return peer.connection->send_packet(boundary); });
+        require(peer.read_packet() == boundary, "outgoing control boundary was corrupted");
+        require(sending.get() == static_cast<ssize_t>(CONTROL_LIMIT + protocol_v2::RECORD_HEADER_SIZE),
+                "outgoing exact control-record limit was rejected");
+        require(peer.connection->send_packet(json::parse(padded_packet("ping", CONTROL_LIMIT + 1))) == -1,
+                "oversized outgoing control record was accepted");
+        require(!peer.connection->is_stopping(), "local control-limit rejection stopped the session");
+        peer.connection->send_packet(packet("ping"));
+        require(peer.read_packet()["type"] == "ping", "session failed after control-limit rejection");
+    }
 }
 
 void bounded_outgoing_serialization() {
@@ -334,12 +487,13 @@ void bounded_outgoing_serialization() {
     auto many_elements = packet("message");
     many_elements["payload"] = std::vector<int>(40000, 0);
     rejected(many_elements);
-    rejected(json::parse(padded_ping(FRAME_LIMIT + 1)));
+    rejected(json::parse(padded_packet("message", FRAME_LIMIT + 1)));
 
-    const auto boundary = json::parse(padded_ping(FRAME_LIMIT));
+    const auto boundary = json::parse(padded_packet("message", FRAME_LIMIT));
     auto sending = std::async(std::launch::async, [&] { return peer.connection->send_packet(boundary); });
     require(peer.read_packet() == boundary, "outgoing boundary frame was corrupted");
-    require(sending.get() == static_cast<ssize_t>(FRAME_LIMIT + 1), "exact outgoing limit was rejected");
+    require(sending.get() == static_cast<ssize_t>(FRAME_LIMIT + protocol_v2::RECORD_HEADER_SIZE),
+            "exact outgoing limit was rejected");
     MessageService::send_to_device(PEER_ID, "after oversize rejection");
     require(peer.read_packet().at("payload").at("text") == "after oversize rejection",
             "session failed after local oversize rejection");
@@ -495,11 +649,19 @@ void connect_disconnect_cycles() {
 void handshake_deadlines() {
     auto verify_expiry = [](Peer& peer, Clock::time_point begin, bool trickle, const std::string& label) {
         auto next_byte = Clock::now();
+        std::string trickle_bytes;
+        if (trickle) {
+            trickle_bytes = std::string(protocol_v2::preface_bytes());
+            trickle_bytes.append("\xff\xff", 2);
+            trickle_bytes.append(200, 'x');
+        }
+        size_t trickle_offset = 0;
         while (!peer.connection->is_stopping()) {
             const auto now = Clock::now();
             require(now - begin < 13s, label + " handshake did not expire");
             if (trickle && now >= next_byte) {
-                peer.write(" ");
+                require(trickle_offset < trickle_bytes.size(), "trickle fixture exhausted");
+                peer.write(trickle_bytes.substr(trickle_offset++, 1));
                 next_byte = now + 100ms;
             }
             std::this_thread::sleep_for(2ms);
@@ -517,7 +679,7 @@ void handshake_deadlines() {
     require(hello_only.read_packet()["type"] == "ping", "missing ping");
     auto hello_expiry = std::async(std::launch::async, [&] { verify_expiry(hello_only, hello_begin, false, "hello-only"); });
     const auto trickle_begin = Clock::now();
-    Peer trickle;
+    Peer trickle(Connection::Role::Incoming, -1, true, false);
     auto trickle_expiry = std::async(std::launch::async, [&] { verify_expiry(trickle, trickle_begin, true, "trickling"); });
     const auto idle_begin = Clock::now();
     Peer idle_ready;
@@ -551,7 +713,11 @@ int main() {
             {"repeated hello and unexpected identity/packet rejection", repeated_hello_and_unexpected_packets},
             {"post-hello messages preserve the incomplete handshake state", messages_do_not_complete_handshake},
             {"malformed hello validation and controlled rejection", malformed_hello_rejection},
-            {"fragmented, coalesced, boundary and oversized frames", frame_boundaries},
+            {"fragmented, coalesced and boundary-sized v2 records", frame_boundaries},
+            {"protocol v1 and malformed v2 preface rejection", incompatible_v1_and_bad_preface},
+            {"initial hello wins a concurrent application-send race", initial_hello_wins_send_race},
+            {"connection EOF truncation and zero-length rejection", connection_eof_and_zero_length_records},
+            {"setup and control record limits", control_record_limits},
             {"bounded outgoing serialization and atomic frame rejection", bounded_outgoing_serialization},
             {"UUID duplicate ownership and stale registry operations", duplicate_ownership},
             {"simultaneous opposite-direction registration", simultaneous_duplicate_registration},

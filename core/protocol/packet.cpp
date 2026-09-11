@@ -6,8 +6,8 @@ using json = nlohmann::json;
 
 namespace gasoline {
 
-Packet parse_packet(const std::string& data) {
-    const json j = json::parse(data);
+Packet parse_packet(std::string_view data) {
+    const json j = json::parse(data.begin(), data.end());
     if (!j.is_object()) {
         throw std::invalid_argument("packet must be an object");
     }
@@ -40,7 +40,7 @@ std::string serialize_packet(const Packet& pkt) {
     j["device_id"] = pkt.device_id;
     j["payload"] = pkt.payload;
 
-    return j.dump() + "\n";
+    return j.dump();
 }
 
 }
