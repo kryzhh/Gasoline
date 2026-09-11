@@ -404,7 +404,7 @@ std::filesystem::path TrustStore::default_database_path() {
 TrustStore::TrustStore(const std::filesystem::path& path) : impl_(std::make_unique<Impl>(path)) {}
 TrustStore::~TrustStore() = default;
 
-void TrustStore::insert_device(const TrustedDevice& device) {
+void TrustStore::import_device_for_admin(const TrustedDevice& device) {
     require(device.revision == 1, "initial trust revision must be one");
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->check_files();
@@ -441,6 +441,29 @@ std::optional<TrustedDevice> TrustStore::find_by_public_key(const TrustPublicKey
     return result;
 }
 
+std::optional<ActivePeerAuthorization> TrustStore::find_active_authorization(
+    const TrustUuid& uuid, const TrustPublicKey& public_key) const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->check_files();
+    auto* db = impl_->db.get();
+    Transaction transaction(db, false);
+    std::optional<ActivePeerAuthorization> result;
+    {
+        Statement query(db, "SELECT revision FROM trusted_devices "
+                            "WHERE uuid=? AND public_key=? AND status='ACTIVE'");
+        query.bind(1, uuid);
+        query.bind(2, public_key);
+        if (query.row()) {
+            ActivePeerAuthorization authorization;
+            authorization.revision = query.integer(0);
+            result = std::move(authorization);
+        }
+    }
+    if (result) result->permissions = read_permissions(db, uuid, false);
+    transaction.commit();
+    return result;
+}
+
 void TrustStore::update_device(const TrustedDevice& device, int64_t expected_revision) {
     next_revision(device.revision, expected_revision);
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -448,7 +471,8 @@ void TrustStore::update_device(const TrustedDevice& device, int64_t expected_rev
     auto* db = impl_->db.get();
     Transaction transaction(db);
     Statement update(db, "UPDATE trusted_devices SET status=?3,revision=?4,local_alias=?5,peer_name=?6,peer_platform=?7,"
-        "pairing_method=?8,paired_at=?9,revoked_at=?10,last_authenticated_at=?11 WHERE uuid=?1 AND public_key=?2 AND revision=?12");
+        "pairing_method=?8,paired_at=?9,revoked_at=?10,last_authenticated_at=?11 "
+        "WHERE uuid=?1 AND public_key=?2 AND status=?3 AND revision=?12");
     bind_device(update, device);
     update.bind(12, expected_revision);
     update.run();
@@ -574,6 +598,92 @@ void TrustStore::delete_attempt(const TrustUuid& id, int64_t expected_revision) 
     remove.bind(1, id);
     remove.bind(2, expected_revision);
     remove.run();
+    changed_one(db);
+    transaction.commit();
+}
+
+void TrustStore::finalize_pairing(const TrustUuid& attempt_id, int64_t expected_revision,
+                                  const PairingFinalization& finalization) {
+    require(expected_revision > 0, "invalid attempt revision");
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->check_files();
+    auto* db = impl_->db.get();
+    Transaction transaction(db);
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    require(now >= 0, "system clock precedes Unix epoch");
+
+    {
+        Statement attempt(db, "SELECT peer_uuid,peer_public_key FROM pairing_attempts "
+                              "WHERE attempt_id=? AND revision=? AND status='CONFIRMED' "
+                              "AND local_confirmed=1 AND peer_confirmed=1 AND expires_at>=?");
+        attempt.bind(1, attempt_id);
+        attempt.bind(2, expected_revision);
+        attempt.bind(3, now);
+        require(attempt.row(), "pairing attempt missing, stale, unconfirmed, consumed, or expired");
+        require(attempt.blob<16>(0) == finalization.peer_uuid &&
+                attempt.blob<32>(1) == finalization.peer_public_key,
+                "pairing finalization identity does not match attempt");
+    }
+
+    const auto permissions = read_permissions(db, attempt_id, true);
+    int64_t trust_revision = 1;
+    bool reactivating = false;
+    {
+        Statement existing(db, "SELECT public_key,status,revision FROM trusted_devices WHERE uuid=?");
+        existing.bind(1, finalization.peer_uuid);
+        if (existing.row()) {
+            require(existing.blob<32>(0) == finalization.peer_public_key,
+                    "revoked trust identity does not match pairing attempt");
+            require(existing.text(1) == "REVOKED", "active trust record already exists");
+            const auto previous_revision = existing.integer(2);
+            require(previous_revision > 0 && previous_revision < std::numeric_limits<int64_t>::max(),
+                    "invalid trust revision for reactivation");
+            trust_revision = previous_revision + 1;
+            reactivating = true;
+        }
+    }
+
+    TrustedDevice device;
+    device.uuid = finalization.peer_uuid;
+    device.public_key = finalization.peer_public_key;
+    device.status = TrustStatus::Active;
+    device.revision = trust_revision;
+    device.local_alias = finalization.local_alias;
+    device.peer_name = finalization.peer_name;
+    device.peer_platform = finalization.peer_platform;
+    device.pairing_method = finalization.pairing_method;
+    device.paired_at = now;
+
+    if (reactivating) {
+        Statement reactivate(db, "UPDATE trusted_devices SET status=?3,revision=?4,local_alias=?5,peer_name=?6,"
+                                 "peer_platform=?7,pairing_method=?8,paired_at=?9,revoked_at=?10,"
+                                 "last_authenticated_at=?11 WHERE uuid=?1 AND public_key=?2 "
+                                 "AND status='REVOKED' AND revision=?12");
+        bind_device(reactivate, device);
+        reactivate.bind(12, trust_revision - 1);
+        reactivate.run();
+        changed_one(db);
+    } else {
+        Statement insert(db, "INSERT INTO trusted_devices VALUES(?,?,?,?,?,?,?,?,?,?,?)");
+        bind_device(insert, device);
+        insert.run();
+    }
+    Statement clear_permissions(db, "DELETE FROM device_permissions WHERE device_uuid=?");
+    clear_permissions.bind(1, device.uuid);
+    clear_permissions.run();
+    write_permissions(db, device.uuid, permissions, false);
+
+    const auto completion_time = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    require(completion_time >= 0, "system clock precedes Unix epoch");
+    Statement consume(db, "DELETE FROM pairing_attempts "
+                          "WHERE attempt_id=? AND revision=? AND status='CONFIRMED' "
+                          "AND local_confirmed=1 AND peer_confirmed=1 AND expires_at>=?");
+    consume.bind(1, attempt_id);
+    consume.bind(2, expected_revision);
+    consume.bind(3, completion_time);
+    consume.run();
     changed_one(db);
     transaction.commit();
 }

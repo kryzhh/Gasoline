@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -133,6 +134,22 @@ PairingAttempt attempt(unsigned value = 1) {
     return a;
 }
 
+PairingFinalization finalization(const PairingAttempt& a) {
+    PairingFinalization result;
+    result.peer_uuid = a.peer_uuid;
+    result.peer_public_key = a.peer_public_key;
+    result.local_alias = "Paired locally";
+    result.peer_name = "Finalized peer";
+    result.peer_platform = "test";
+    result.pairing_method = "fixture";
+    return result;
+}
+
+int64_t unix_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 void fresh_and_configuration() {
     Fixture f;
     const mode_t previous = ::umask(0);
@@ -145,7 +162,7 @@ void fresh_and_configuration() {
                 "incorrect SQLite configuration");
         require(store.state(id(1)) == TrustState::Unknown && !store.find_device(id(1)) &&
                 store.permissions(id(1)).empty(), "fresh store contains trust");
-        store.insert_device(device());
+        store.import_device_for_admin(device());
         require(mode(f.path.parent_path()) == 0700, "state directory is not 0700");
         for (const auto* suffix : {"", ".lock", "-wal", "-shm"})
             require(mode(f.path.string() + suffix) == 0600, "database/sidecar is not 0600 under permissive umask");
@@ -198,7 +215,7 @@ void device_lifecycle() {
     Fixture f;
     TrustStore store(f.path);
     auto d = device();
-    store.insert_device(d);
+    store.import_device_for_admin(d);
     auto found = store.find_device(d.uuid);
     require(found && found->public_key == d.public_key && found->permissions == d.permissions &&
             found->local_alias == d.local_alias && found->paired_at == d.paired_at, "insert/fetch mismatch");
@@ -220,30 +237,32 @@ void device_lifecycle() {
             store.state(d.uuid) == TrustState::Revoked && store.permissions(d.uuid).empty(), "revocation failed");
     store.create_attempt(attempt());
     require(store.state(d.uuid) == TrustState::Revoked, "pending record resurrected revoked device");
-    rejects([&] { store.insert_device(device()); });
+    rejects([&] { store.import_device_for_admin(device()); });
     rejects([&] { store.revoke_device(id(99), 1, 120); });
     auto reactivated = *found;
     reactivated.status = TrustStatus::Active;
     reactivated.revoked_at.reset();
     reactivated.revision = 4;
     reactivated.permissions = {"files.receive"};
-    store.update_device(reactivated, 3);
-    require(store.state(d.uuid) == TrustState::Active && store.find_device(d.uuid)->revision == 4 &&
-            store.permissions(d.uuid) == reactivated.permissions, "explicit revision-checked reactivation failed");
+    rejects([&] { store.update_device(reactivated, 3); });
+    found = store.find_device(d.uuid);
+    require(found->status == TrustStatus::Revoked && found->revision == 3 &&
+            !store.find_active_authorization(d.uuid, d.public_key) && store.permissions(d.uuid).empty(),
+            "ordinary update reactivated a revoked device");
 }
 
 void duplicates_and_constraints() {
     Fixture f;
     TrustStore store(f.path);
-    store.insert_device(device());
+    store.import_device_for_admin(device());
     auto duplicate_uuid = device(2);
     duplicate_uuid.uuid = id(1);
-    rejects([&] { store.insert_device(duplicate_uuid); });
+    rejects([&] { store.import_device_for_admin(duplicate_uuid); });
     auto duplicate_key = device(2);
     duplicate_key.public_key = device().public_key;
-    rejects([&] { store.insert_device(duplicate_key); });
+    rejects([&] { store.import_device_for_admin(duplicate_key); });
     store.revoke_device(id(1), 1, 120);
-    rejects([&] { store.insert_device(duplicate_key); });
+    rejects([&] { store.import_device_for_admin(duplicate_key); });
     RawDb raw(f.path);
     for (const auto* sql : {
         "UPDATE trusted_devices SET uuid=zeroblob(15)",
@@ -298,14 +317,184 @@ void attempts_and_pending_isolation() {
     require(!store.find_attempt(a.attempt_id), "attempt deletion failed");
 }
 
+void authorization_lookup() {
+    Fixture f;
+    TrustStore store(f.path);
+    const auto trusted = device();
+    store.import_device_for_admin(trusted);
+
+    const auto authorized = store.find_active_authorization(trusted.uuid, trusted.public_key);
+    require(authorized && authorized->revision == trusted.revision &&
+            authorized->permissions == trusted.permissions, "matching UUID/key was not authorized");
+    require(!store.find_active_authorization(id(2), trusted.public_key),
+            "mismatched UUID was authorized");
+    require(!store.find_active_authorization(trusted.uuid, device(2).public_key),
+            "mismatched public key was authorized");
+
+    auto pending = attempt(2);
+    const auto now = unix_seconds();
+    pending.created_at = now - 10;
+    pending.updated_at = now - 5;
+    pending.expires_at = now + 60;
+    store.create_attempt(pending);
+    require(!store.find_active_authorization(pending.peer_uuid, pending.peer_public_key),
+            "pending attempt was authorized");
+    rejects([&] { store.finalize_pairing(pending.attempt_id, 1, finalization(pending)); });
+    require(!store.find_device(pending.peer_uuid), "pending attempt was finalized");
+
+    store.revoke_device(trusted.uuid, trusted.revision, 120);
+    require(!store.find_active_authorization(trusted.uuid, trusted.public_key),
+            "revoked device was authorized");
+}
+
+void atomic_pairing_finalization() {
+    Fixture f;
+    TrustStore store(f.path);
+    auto a = attempt();
+    const auto now = unix_seconds();
+    a.created_at = now - 10;
+    a.updated_at = now - 5;
+    a.expires_at = now + 60;
+    store.create_attempt(a);
+    a.status = PairingAttemptStatus::Confirmed;
+    a.local_confirmed = true;
+    a.peer_confirmed = true;
+    a.revision = 2;
+    a.updated_at = now;
+    store.update_attempt(a, 1);
+
+    auto metadata = finalization(a);
+    metadata.peer_uuid = id(99);
+    rejects([&] { store.finalize_pairing(a.attempt_id, 2, metadata); });
+    require(store.find_attempt(a.attempt_id).has_value() && !store.find_device(a.peer_uuid),
+            "UUID-mismatched finalization changed persistent state");
+    metadata = finalization(a);
+    metadata.peer_public_key = device(99).public_key;
+    rejects([&] { store.finalize_pairing(a.attempt_id, 2, metadata); });
+    require(store.find_attempt(a.attempt_id).has_value() && !store.find_device(a.peer_uuid),
+            "key-mismatched finalization changed persistent state");
+    metadata = finalization(a);
+    store.finalize_pairing(a.attempt_id, 2, metadata);
+    const auto trusted = store.find_device(a.peer_uuid);
+    require(trusted && trusted->status == TrustStatus::Active && trusted->revision == 1 &&
+            trusted->public_key == a.peer_public_key &&
+            trusted->permissions == a.proposed_permissions,
+            "confirmed attempt did not create the expected ACTIVE trust record");
+    require(!store.find_attempt(a.attempt_id), "finalized attempt was not consumed");
+    const auto authorized = store.find_active_authorization(a.peer_uuid, a.peer_public_key);
+    require(authorized && authorized->revision == 1 && authorized->permissions == a.proposed_permissions,
+            "finalized peer was not authorized");
+
+    rejects([&] { store.finalize_pairing(a.attempt_id, 2, metadata); });
+    auto collision = attempt(2);
+    collision.peer_uuid = a.peer_uuid;
+    collision.peer_public_key = a.peer_public_key;
+    collision.created_at = now;
+    collision.updated_at = now;
+    collision.expires_at = now + 60;
+    collision.status = PairingAttemptStatus::Confirmed;
+    collision.local_confirmed = true;
+    collision.peer_confirmed = true;
+    store.create_attempt(collision);
+    rejects([&] { store.finalize_pairing(collision.attempt_id, 1, finalization(collision)); });
+    require(store.find_attempt(collision.attempt_id).has_value(),
+            "failed duplicate-trust finalization consumed its attempt");
+    RawDb raw(f.path);
+    require(raw.scalar("SELECT count(*) FROM trusted_devices") == 1,
+            "replayed finalization created duplicate trust");
+}
+
+void cancellation_revision_race() {
+    Fixture f;
+    TrustStore first(f.path), second(f.path);
+    auto a = attempt();
+    const auto now = unix_seconds();
+    a.created_at = now - 10;
+    a.updated_at = now - 5;
+    a.expires_at = now + 60;
+    a.status = PairingAttemptStatus::Confirmed;
+    a.local_confirmed = true;
+    a.peer_confirmed = true;
+    first.create_attempt(a);
+    const auto stale = finalization(a);
+
+    a.status = PairingAttemptStatus::Cancelled;
+    a.revision = 2;
+    a.updated_at = now;
+    second.update_attempt(a, 1);
+    rejects([&] { first.finalize_pairing(a.attempt_id, 1, stale); });
+    require(!first.find_device(a.peer_uuid) &&
+            !first.find_active_authorization(a.peer_uuid, a.peer_public_key),
+            "stale finalization promoted a cancelled attempt");
+}
+
+void expired_attempt_cannot_finalize() {
+    Fixture f;
+    TrustStore store(f.path);
+    auto a = attempt();
+    const auto now = unix_seconds();
+    a.created_at = now - 120;
+    a.updated_at = now - 120;
+    a.expires_at = now - 60;
+    a.status = PairingAttemptStatus::Confirmed;
+    a.local_confirmed = true;
+    a.peer_confirmed = true;
+    store.create_attempt(a);
+
+    rejects([&] { store.finalize_pairing(a.attempt_id, 1, finalization(a)); });
+    require(store.find_attempt(a.attempt_id).has_value() && !store.find_device(a.peer_uuid),
+            "expired finalization consumed its attempt or created trust");
+}
+
+void revoked_device_requires_pairing_finalization() {
+    Fixture f;
+    TrustStore store(f.path);
+    const auto original = device();
+    store.import_device_for_admin(original);
+    store.revoke_device(original.uuid, 1, 120);
+    require(!store.find_active_authorization(original.uuid, original.public_key),
+            "revoked device remained authorized");
+
+    auto ordinary = *store.find_device(original.uuid);
+    ordinary.status = TrustStatus::Active;
+    ordinary.revision = 3;
+    ordinary.revoked_at.reset();
+    ordinary.permissions = {"files.receive"};
+    rejects([&] { store.update_device(ordinary, 2); });
+    require(store.state(original.uuid) == TrustState::Revoked &&
+            !store.find_active_authorization(original.uuid, original.public_key),
+            "failed ordinary reactivation changed trust");
+
+    auto a = attempt();
+    const auto now = unix_seconds();
+    a.created_at = now - 10;
+    a.updated_at = now - 5;
+    a.expires_at = now + 60;
+    a.status = PairingAttemptStatus::Confirmed;
+    a.local_confirmed = true;
+    a.peer_confirmed = true;
+    a.proposed_permissions = {"files.receive"};
+    store.create_attempt(a);
+    store.finalize_pairing(a.attempt_id, 1, finalization(a));
+
+    const auto reactivated = store.find_device(original.uuid);
+    const auto authorized = store.find_active_authorization(original.uuid, original.public_key);
+    require(reactivated && reactivated->status == TrustStatus::Active &&
+            reactivated->revision == 3 && !reactivated->revoked_at &&
+            reactivated->permissions == a.proposed_permissions && authorized &&
+            authorized->revision == 3 && authorized->permissions == a.proposed_permissions &&
+            !store.find_attempt(a.attempt_id),
+            "confirmed pairing did not atomically reactivate revoked trust");
+}
+
 void transactional_rollback() {
     Fixture f;
     TrustStore store(f.path);
     auto d = device();
     d.permissions = {"duplicate", "duplicate"};
-    rejects([&] { store.insert_device(d); });
+    rejects([&] { store.import_device_for_admin(d); });
     require(!store.find_device(d.uuid), "failed permission insert left trusted row behind");
-    store.insert_device(device());
+    store.import_device_for_admin(device());
     d.revision = 2;
     d.local_alias = "Must roll back";
     rejects([&] { store.update_device(d, 1); });
@@ -335,7 +524,7 @@ void reopen_and_wal_recovery() {
     Fixture f;
     {
         TrustStore store(f.path);
-        store.insert_device(device());
+        store.import_device_for_admin(device());
         store.create_attempt(attempt(2));
         store.revoke_device(id(1), 1, 120);
     }
@@ -349,7 +538,7 @@ void reopen_and_wal_recovery() {
     if (child == 0) {
         try {
             TrustStore store(f.path);
-            store.insert_device(device(3));
+            store.import_device_for_admin(device(3));
             ::_exit(0); // Committed WAL survives without SQLite's normal close/checkpoint.
         } catch (...) { ::_exit(1); }
     }
@@ -397,7 +586,7 @@ void corrupt_and_failed_open() {
     }
     for (bool truncate : {false, true}) {
         Fixture f;
-        { TrustStore store(f.path); store.insert_device(device()); store.revoke_device(id(1), 1, 120); }
+        { TrustStore store(f.path); store.import_device_for_admin(device()); store.revoke_device(id(1), 1, 120); }
         auto damaged = bytes(f.path);
         require(damaged.size() > 100, "missing established SQLite pages");
         if (truncate) damaged.resize(damaged.size() / 2);
@@ -408,7 +597,7 @@ void corrupt_and_failed_open() {
     }
     for (const std::string pragma : {"PRAGMA user_version=99", "PRAGMA application_id=0", "PRAGMA user_version=0"}) {
         Fixture f;
-        { TrustStore store(f.path); store.insert_device(device()); }
+        { TrustStore store(f.path); store.import_device_for_admin(device()); }
         { RawDb raw(f.path); raw.run(pragma); }
         const auto before = bytes(f.path);
         rejects([&] { TrustStore failed(f.path); });
@@ -425,7 +614,7 @@ void corrupt_and_failed_open() {
 
 void unsafe_storage() {
     Fixture f;
-    { TrustStore store(f.path); store.insert_device(device()); }
+    { TrustStore store(f.path); store.import_device_for_admin(device()); }
     const auto original = bytes(f.path);
     require(::chmod(f.path.c_str(), 0644) == 0, "chmod failed");
     rejects([&] { TrustStore failed(f.path); });
@@ -471,7 +660,7 @@ void concurrent_access() {
             auto& store = thread % 2 ? first : second;
             for (unsigned i = 0; i < 10; ++i) {
                 const auto d = device(thread * 10 + i + 1);
-                store.insert_device(d);
+                store.import_device_for_admin(d);
                 require(store.find_device(d.uuid)->public_key == d.public_key, "concurrent read/write mismatch");
             }
         }));
@@ -502,6 +691,11 @@ int main() {
             {"device lifecycle, revisions and revocation", device_lifecycle},
             {"duplicate identities, SQL checks and foreign keys", duplicates_and_constraints},
             {"attempt lifecycle and pending trust isolation", attempts_and_pending_isolation},
+            {"UUID/key-bound active authorization", authorization_lookup},
+            {"atomic confirmed-attempt finalization and replay rejection", atomic_pairing_finalization},
+            {"cancellation revision prevents stale promotion", cancellation_revision_race},
+            {"expired attempts cannot finalize", expired_attempt_cannot_finalize},
+            {"revoked trust requires confirmed pairing finalization", revoked_device_requires_pairing_finalization},
             {"transactional rollback and immutable identity", transactional_rollback},
             {"reopen and committed WAL recovery", reopen_and_wal_recovery},
             {"v1 to v2 schema migration", [] { migration(false); }},

@@ -290,15 +290,18 @@ A per-instance mutex serializes operations; SQLite serializes writes across
 instances/processes. Callers must keep the TrustStore alive until all users finish
 and open a new connection after fork rather than use an inherited connection.
 
-The small API provides `insert_device`, `find_device`, `find_by_public_key`,
-`update_device`, `revoke_device`, `state`, `permissions`, attempt CRUD, and a
-read-only configuration snapshot. Raw SQLite handles never leave the implementation.
+The small API provides the explicitly administrative `import_device_for_admin`,
+record lookups, trust updates/revocation, state inspection, attempt CRUD, atomic
+pairing finalization, and a read-only configuration snapshot. Raw SQLite handles
+never leave the implementation. Pairing code must not use the administrative
+import path.
 All writes use `BEGIN IMMEDIATE` transactions, including permission replacement.
 Device/attempt snapshot reads use read transactions. Updates require an expected
 revision and advance it by exactly one; stale revisions fail without partial
-updates. Device UUID/public key and attempt identity binding are immutable.
-Revoke increments the revision and clears permissions atomically. Only an explicit
-local `update_device` can reactivate a revoked record; there is no automatic path.
+updates. Device UUID, public key, and status are immutable through ordinary
+`update_device` calls. Revoke increments the revision and clears permissions
+atomically. A revoked record can return to ACTIVE only through a new confirmed,
+non-expired `finalize_pairing` operation with the same UUID/public-key binding.
 
 `state` distinguishes UNKNOWN, PAIRING_PENDING, ACTIVE, and REVOKED, with a stored
 trust decision taking precedence over attempts. PENDING and CONFIRMED attempts
@@ -306,6 +309,21 @@ without a trust record remain PAIRING_PENDING and never grant permissions.
 `permissions` returns only effective permissions for ACTIVE records; all other
 states return none. Future authentication must compare the stored public key and
 trust status, not authorize by UUID or permissions alone.
+
+`find_active_authorization` is the authorization-facing lookup. It atomically
+matches UUID, Ed25519 public key, and ACTIVE status, then returns the matching
+trust revision and effective permissions from the same read transaction. It is
+used only after the authentication layer proves possession of that public key.
+The generic device/key lookups are administrative/audit operations whose result
+may be revoked and must not be treated as authorization.
+
+`finalize_pairing` is the only pairing completion path. In one immediate write
+transaction it checks the attempt ID and expected revision, exact peer UUID/key,
+CONFIRMED status, both confirmations, and expiration; copies the attempt's
+proposed permissions into a new ACTIVE revision-one record or advances and
+reactivates the matching revoked record; and deletes the attempt. A stale
+cancellation, duplicate/replay, expired attempt, active-record collision, or
+identity mismatch fails without creating or reactivating trust.
 
 Open, integrity-check, schema, permission, busy, and constraint errors are explicit
 exceptions. SQLite errors retain their result codes. Transactions roll back on
