@@ -4,6 +4,50 @@ project(gasoline)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_program(GASOLINE_CARGO_EXECUTABLE NAMES cargo)
+if(NOT GASOLINE_CARGO_EXECUTABLE)
+    message(FATAL_ERROR "cargo is required to build the pinned Clatter wrapper")
+endif()
+find_package(Threads REQUIRED)
+
+set(CLATTER_FFI_MANIFEST
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/noise/clatter_ffi/Cargo.toml)
+set(CLATTER_FFI_LOCK
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/noise/clatter_ffi/Cargo.lock)
+set(CLATTER_FFI_SOURCE
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/noise/clatter_ffi/src/lib.rs)
+if(WIN32)
+    set(CLATTER_FFI_LIBRARY_NAME gasoline_clatter_ffi.lib)
+else()
+    set(CLATTER_FFI_LIBRARY_NAME libgasoline_clatter_ffi.a)
+endif()
+
+set(CLATTER_FFI_PRODUCTION_DIR ${CMAKE_CURRENT_BINARY_DIR}/cargo-clatter-production)
+set(CLATTER_FFI_PRODUCTION_ARCHIVE
+    ${CLATTER_FFI_PRODUCTION_DIR}/release/${CLATTER_FFI_LIBRARY_NAME})
+add_custom_command(
+    OUTPUT ${CLATTER_FFI_PRODUCTION_ARCHIVE}
+    COMMAND ${CMAKE_COMMAND} -E env
+            CARGO_TARGET_DIR=${CLATTER_FFI_PRODUCTION_DIR}
+            ${GASOLINE_CARGO_EXECUTABLE} build --release --locked
+            --manifest-path ${CLATTER_FFI_MANIFEST}
+    DEPENDS ${CLATTER_FFI_MANIFEST} ${CLATTER_FFI_LOCK} ${CLATTER_FFI_SOURCE}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Building sealed Clatter 2.3.0 production wrapper"
+    VERBATIM)
+add_custom_target(clatter_ffi_production DEPENDS ${CLATTER_FFI_PRODUCTION_ARCHIVE})
+
+add_library(gasoline_noise STATIC core/noise/noise_session.cpp)
+add_dependencies(gasoline_noise clatter_ffi_production)
+target_include_directories(gasoline_noise PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(gasoline_noise PUBLIC
+    ${CLATTER_FFI_PRODUCTION_ARCHIVE}
+    Threads::Threads
+    ${CMAKE_DL_LIBS})
+if(UNIX)
+    target_link_libraries(gasoline_noise PUBLIC m)
+endif()
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 # Requires SQLite >= 3.37.0 for STRICT table support and modern security pragmas.
@@ -90,6 +134,44 @@ target_link_libraries(gasoline
 
 include(CTest)
 if(BUILD_TESTING)
+    set(CLATTER_FFI_TEST_DIR ${CMAKE_CURRENT_BINARY_DIR}/cargo-clatter-test)
+    set(CLATTER_FFI_TEST_ARCHIVE
+        ${CLATTER_FFI_TEST_DIR}/release/${CLATTER_FFI_LIBRARY_NAME})
+    add_custom_command(
+        OUTPUT ${CLATTER_FFI_TEST_ARCHIVE}
+        COMMAND ${CMAKE_COMMAND} -E env
+                CARGO_TARGET_DIR=${CLATTER_FFI_TEST_DIR}
+                ${GASOLINE_CARGO_EXECUTABLE} build --release --locked
+                --features test-support
+                --manifest-path ${CLATTER_FFI_MANIFEST}
+        DEPENDS ${CLATTER_FFI_MANIFEST} ${CLATTER_FFI_LOCK} ${CLATTER_FFI_SOURCE}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Building test-only deterministic Clatter wrapper"
+        VERBATIM)
+    add_custom_target(clatter_ffi_test_support DEPENDS ${CLATTER_FFI_TEST_ARCHIVE})
+
+    add_executable(noise_wrapper_tests
+        tests/noise_wrapper_tests.cpp
+        core/noise/noise_session.cpp)
+    add_dependencies(noise_wrapper_tests clatter_ffi_test_support)
+    target_include_directories(noise_wrapper_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(noise_wrapper_tests
+        ${CLATTER_FFI_TEST_ARCHIVE}
+        Threads::Threads
+        ${CMAKE_DL_LIBS})
+    if(UNIX)
+        target_link_libraries(noise_wrapper_tests m)
+    endif()
+    add_test(NAME noise_wrapper_tests COMMAND noise_wrapper_tests)
+    set_tests_properties(noise_wrapper_tests PROPERTIES TIMEOUT 30)
+
+    add_test(
+        NAME noise_wrapper_production_exports
+        COMMAND ${CMAKE_COMMAND}
+                -DARCHIVE=${CLATTER_FFI_PRODUCTION_ARCHIVE}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_noise_exports.cmake)
+    set_tests_properties(noise_wrapper_production_exports PROPERTIES TIMEOUT 30)
+
     add_executable(trust_store_tests tests/trust_store_tests.cpp)
     target_link_libraries(trust_store_tests gasoline_trust PkgConfig::SQLITE3 pthread)
     add_test(NAME trust_store_tests COMMAND trust_store_tests)
