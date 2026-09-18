@@ -1,6 +1,7 @@
 #include "device_registry.hpp"
 #include "../utils/logger.hpp"
 #include "../networking/connection.hpp"
+#include "../auth/session_authentication.hpp"
 
 #include <algorithm>
 
@@ -8,13 +9,19 @@ namespace gasoline {
 
 DeviceRegistry device_registry;
 
-DeviceRegistry::RegistrationResult DeviceRegistry::add_device(const Device& device) {
+DeviceRegistry::RegistrationResult DeviceRegistry::publish_authenticated_device(
+    const Device& device, const AuthorizedPeer& authorization) {
     // Release strong references after the registry lock: their destructors may
     // perform session cleanup, which also acquires this lock.
     auto candidate = device.connection.lock();
     std::shared_ptr<Connection> owner;
     std::lock_guard<std::mutex> lock(registry_mutex);
-    if (!candidate || candidate->is_stopping()) {
+    if (!candidate || candidate->session_id() != device.session_id || candidate->is_stopping() ||
+        device.device_id != authorization.device_id() ||
+        device.public_key != authorization.public_key() ||
+        device.trust_revision != authorization.revision() ||
+        device.permissions != authorization.permissions() ||
+        device.state != DeviceState::AUTHENTICATED) {
         return {};
     }
     for (auto& existing : devices) {
@@ -28,11 +35,15 @@ DeviceRegistry::RegistrationResult DeviceRegistry::add_device(const Device& devi
             (existing.preferred_connection || !device.preferred_connection)) {
             return {};
         }
+        Device published = device;
+        published.state = DeviceState::READY;
         RegistrationResult result{true, existing};
-        existing = device;
+        existing = std::move(published);
         return result;
     }
-    devices.push_back(device);
+    Device published = device;
+    published.state = DeviceState::READY;
+    devices.push_back(std::move(published));
     log("Device registered: " + device.device_name);
     return {true, std::nullopt};
 }
@@ -49,17 +60,6 @@ void DeviceRegistry::remove_device(uint64_t session_id) {
         devices.end()
     );
     log("Device removed from registry");
-}
-
-bool DeviceRegistry::set_state_for_session(uint64_t session_id, DeviceState state) {
-    std::lock_guard<std::mutex> lock(registry_mutex);
-    for (auto& device : devices) {
-        if (device.session_id == session_id) {
-            device.state = state;
-            return true;
-        }
-    }
-    return false;
 }
 
 void DeviceRegistry::list_devices() { // Lists currently connected devices

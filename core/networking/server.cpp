@@ -18,6 +18,9 @@
 
 namespace gasoline {
 
+Server::Server(std::shared_ptr<SessionAuthentication> authentication)
+    : authentication_(std::move(authentication)) {}
+
 void Server::start() { // Start function declaration
 
     int server_fd; // File descriptor 
@@ -70,7 +73,8 @@ void Server::start() { // Start function declaration
 
         log("Device connected on socket: " + std::to_string(client_socket));
 
-        auto connection = Connection::create(client_socket, Connection::Role::Incoming);
+        auto connection = Connection::create(
+            client_socket, Connection::Role::Incoming, authentication_);
         connection->start();
     }
 }

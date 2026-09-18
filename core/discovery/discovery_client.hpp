@@ -9,10 +9,13 @@
 
 namespace gasoline {
 
+class SessionAuthentication;
+
 class DiscoveryClient {
 public:
-    DiscoveryClient();
-    explicit DiscoveryClient(std::unique_ptr<IDiscoveryBrowser> browser);
+    explicit DiscoveryClient(std::shared_ptr<SessionAuthentication> authentication);
+    DiscoveryClient(std::shared_ptr<SessionAuthentication> authentication,
+                    std::unique_ptr<IDiscoveryBrowser> browser);
     ~DiscoveryClient();
 
     void start();
@@ -22,6 +25,7 @@ public:
 
 private:
     std::unique_ptr<IDiscoveryBrowser> browser_;
+    std::shared_ptr<SessionAuthentication> authentication_;
     std::mutex discovery_mutex_;
     std::set<std::string> pending_connections_;
 };

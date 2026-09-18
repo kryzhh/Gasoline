@@ -1,10 +1,11 @@
 #include "message_handler.hpp"
+#include "../../auth/session_authentication.hpp"
 #include "../../events/event_bus.hpp"
 #include "../../utils/logger.hpp"
 
 namespace gasoline {
 
-void MessageHandler::handle(const Packet& pkt) {
+void MessageHandler::handle(const Packet& pkt, const AuthorizedPeer& authenticated_peer) {
 
     if (!pkt.payload.contains("text")) { // Packet should be valid and have a text field
         log("Message packet missing 'text'");
@@ -13,7 +14,7 @@ void MessageHandler::handle(const Packet& pkt) {
 
     std::string msg = pkt.payload["text"];
 
-    EventBus::emit_message(pkt.device_id, msg);
+    EventBus::emit_message(authenticated_peer.device_id(), msg);
 }
 
 }

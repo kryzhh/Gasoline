@@ -81,6 +81,17 @@ private:
 
 class TrustStore {
 public:
+    struct ChangeToken {
+        uint64_t local_generation = 0;
+        int64_t external_generation = 0;
+
+        bool operator==(const ChangeToken& other) const noexcept {
+            return local_generation == other.local_generation &&
+                   external_generation == other.external_generation;
+        }
+        bool operator!=(const ChangeToken& other) const noexcept { return !(*this == other); }
+    };
+
     struct Configuration {
         int schema_version;
         bool foreign_keys;
@@ -104,6 +115,11 @@ public:
     // ACTIVE status are matched atomically in one read transaction.
     std::optional<ActivePeerAuthorization> find_active_authorization(
         const TrustUuid& uuid, const TrustPublicKey& public_key) const;
+    // A cheap invalidation hint for live authorization monitors. The local
+    // component advances for writes through this instance; SQLite data_version
+    // advances for commits made through other connections/processes. Callers
+    // must still re-run find_active_authorization to make a trust decision.
+    ChangeToken change_token() const;
     // UUID, key, and status are immutable through ordinary updates. Replacement
     // revision must be expected_revision + 1. Use revoke_device to revoke and a
     // newly confirmed finalize_pairing operation to reactivate.

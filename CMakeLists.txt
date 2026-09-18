@@ -16,6 +16,10 @@ add_library(gasoline_trust core/trust/trust_store.cpp)
 target_include_directories(gasoline_trust PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(gasoline_trust PRIVATE PkgConfig::SQLITE3 pthread)
 
+add_library(gasoline_auth core/auth/session_authentication.cpp)
+target_include_directories(gasoline_auth PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(gasoline_auth PUBLIC gasoline_trust)
+
 add_library(gasoline_protocol_v2 core/protocol/v2_framing.cpp)
 target_include_directories(gasoline_protocol_v2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -75,6 +79,7 @@ add_executable(gasoline
 
 # Link Avahi (Linux discovery)
 target_link_libraries(gasoline
+    gasoline_auth
     gasoline_trust
     gasoline_protocol_v2
     PkgConfig::SODIUM
@@ -95,6 +100,7 @@ if(BUILD_TESTING)
         core/identity/device_identity.cpp
     )
     target_link_libraries(identity_tests PkgConfig::SODIUM pthread)
+    target_compile_definitions(identity_tests PRIVATE GASOLINE_IDENTITY_TESTING=1)
     # Observe/inject fsync calls in identity tests without production test hooks.
     set_property(TARGET identity_tests APPEND_STRING PROPERTY LINK_FLAGS " -Wl,--wrap=fsync")
     add_test(NAME identity_tests COMMAND identity_tests)
@@ -102,6 +108,7 @@ if(BUILD_TESTING)
 
     add_executable(session_tests
         tests/session_tests.cpp
+        core/auth/session_authentication.cpp
         core/networking/connection.cpp
         core/networking/connection_manager.cpp
         core/networking/send_packet.cpp
@@ -117,6 +124,8 @@ if(BUILD_TESTING)
         services/message_service.cpp
     )
     target_link_libraries(session_tests gasoline_protocol_v2 pthread)
+    target_compile_definitions(session_tests PRIVATE GASOLINE_SESSION_TESTING=1)
+    target_link_libraries(session_tests gasoline_trust PkgConfig::SQLITE3)
     add_test(NAME session_tests COMMAND session_tests)
     set_tests_properties(session_tests PROPERTIES TIMEOUT 60)
 

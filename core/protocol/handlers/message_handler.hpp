@@ -9,9 +9,11 @@
 
 namespace gasoline {
 
+class AuthorizedPeer;
+
 class MessageHandler {
 public:
-    static void handle(const Packet& pkt);
+    static void handle(const Packet& pkt, const AuthorizedPeer& authenticated_peer);
 };
 
 }

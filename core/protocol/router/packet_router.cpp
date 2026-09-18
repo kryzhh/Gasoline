@@ -12,9 +12,13 @@
 
 namespace gasoline {
 
-PacketRouteResult PacketRouter::route(const Packet& pkt, const std::shared_ptr<Connection>& connection) {
+PacketRouteResult PacketRouter::route(const Packet& pkt,
+                                      const std::shared_ptr<Connection>& connection,
+                                      const AuthorizedPeer* authenticated_peer) {
     PacketRouteResult result;
-    log_rx(pkt.device_id, pkt.type);
+    log_rx(authenticated_peer == nullptr ? std::to_string(connection->session_id()) :
+                                          authenticated_peer->device_id(),
+           pkt.type);
     log("Routing packet type: " + pkt.type);
     if (pkt.type == "hello") {
         const auto hello_result = HelloHandler::handle(pkt, connection);
@@ -31,21 +35,17 @@ PacketRouteResult PacketRouter::route(const Packet& pkt, const std::shared_ptr<C
     }
     if (pkt.type == "ping") {
         PingHandler::handle(pkt, connection);
-        if (!connection->mark_ready()) {
-            result.action = PacketRouteAction::Disconnect;
-        }
         return result;
     }
     if (pkt.type == "pong") {
-        if (!connection->mark_ready()) {
-            result.action = PacketRouteAction::Disconnect;
-        } else {
-            log("Connection stabilized; device marked READY");
-        }
         return result;
     }
     if (pkt.type == "message") {
-        MessageHandler::handle(pkt);
+        if (authenticated_peer == nullptr) {
+            result.action = PacketRouteAction::Disconnect;
+            return result;
+        }
+        MessageHandler::handle(pkt, *authenticated_peer);
         return result;
     }
     log("Unknown packet type: " + pkt.type);

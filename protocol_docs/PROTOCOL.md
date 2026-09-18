@@ -100,31 +100,32 @@ Possession of a device_id alone must not be treated as trust or authorization.
 ---
 
 # Connection Lifecycle
-When two devices connect, they follow this sequence:
+The current authentication-preparation milestone follows this sequence:
 ```
 Device discovery (mDNS)
         ↓
 Connection established
         ↓
-hello packet exchange
+protocol-v2 preface and temporary hello metadata
         ↓
-device registration
-        ↓
-normal packet communication
-        ↓
-keepalive (ping/pong)
+wait for the future authenticated handshake
 ```
-Devices are discovered using mDNS service advertisement. Once discovered, devices establish TCP connections and exchange hello packets for registration. Keepalive is maintained through periodic ping/pong exchanges.
+Discovery and hello UUIDs are untrusted routing/setup hints. Hello no longer
+registers a device or grants UUID ownership. Production sessions cannot reach
+READY until the authenticated handshake is implemented; application packets and
+ping/pong are rejected before READY.
 
 ---
 
 # Core Packet Types
 
 ## hello
-Sent immediately after a connection is established.
+Sent immediately after a connection is established as temporary compatibility
+metadata.
 Purpose:
-* identify device
-* register device in the system
+* carry legacy display metadata while the authenticated replacement is pending
+
+It is not authenticated, does not register a device, and cannot authorize traffic.
 Example:
 ```json
 {

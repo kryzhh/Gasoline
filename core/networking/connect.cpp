@@ -8,7 +8,8 @@
 
 namespace gasoline {
 
-void connect_to_device(const std::string& ip, int port) {
+void connect_to_device(const std::string& ip, int port,
+                       std::shared_ptr<SessionAuthentication> authentication) {
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -37,7 +38,8 @@ void connect_to_device(const std::string& ip, int port) {
 
     log("Connected to device");
 
-    auto connection = Connection::create(sock, Connection::Role::Outgoing);
+    auto connection = Connection::create(
+        sock, Connection::Role::Outgoing, std::move(authentication));
     connection->start();
 }
 

@@ -6,6 +6,8 @@
 
 #include "device.hpp"
 
+namespace gasoline { class AuthorizedPeer; }
+
 namespace gasoline {
 
 /*
@@ -22,14 +24,17 @@ public:
         std::optional<Device> replaced_device;
     };
 
-    RegistrationResult add_device(const Device& device);
     void remove_device(uint64_t session_id);
-    bool set_state_for_session(uint64_t session_id, DeviceState state);
     void list_devices();
     bool is_already_connected(std::string device_id);
     std::vector<Device> get_devices_copy();
 
 private:
+    friend class Connection;
+    // Final validation, duplicate arbitration, READY transition, and ownership
+    // replacement are committed together under registry_mutex.
+    RegistrationResult publish_authenticated_device(
+        const Device& device, const AuthorizedPeer& authorization);
 
     std::vector<Device> devices;
     std::mutex registry_mutex;

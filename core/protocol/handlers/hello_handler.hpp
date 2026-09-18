@@ -1,6 +1,6 @@
 #pragma once
 
-// Hello packet handler, basically registers device.
+// Temporary compatibility validator for unverified hello metadata.
 #include "../packet.hpp"
 #include <memory>
 namespace gasoline {

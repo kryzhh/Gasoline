@@ -67,13 +67,14 @@ close waits for the serialized writer to exit; later sends fail without touching
 the socket. Nonblocking sends use a 10-second monotonic write deadline so a peer
 that stops reading cannot hold a writer indefinitely.
 
-A session has 10 seconds from creation to complete `hello` followed by
-`ping`/`pong` and reach READY, measured with `std::chrono::steady_clock`. Partial
-traffic does not reset this deadline. READY sessions have no idle timeout in this
-milestone. Only one valid peer hello is accepted. Repeated hello, changed packet
-identity, malformed JSON, and packets before the first hello close the session.
-Message handling after hello is unchanged, but messages do not complete or extend
-the handshake. These checks enforce protocol order, not authentication.
+A session has 10 seconds from creation to complete the future authenticated
+handshake and reach READY, measured with `std::chrono::steady_clock`. Partial
+traffic does not reset this deadline. The legacy v2 `hello` is retained only as
+temporary, unverified setup metadata: it cannot register a device, reserve UUID
+ownership, authorize sends, or reach READY. Ping, pong, messages, and all other
+application/control records are rejected before authentication. Until the
+cryptographic handshake is implemented, production sessions intentionally cannot
+reach READY.
 
 Protocol v2 is an incompatible binary-framed transport. Each direction starts
 with the ten-byte preface `GASOLINE 00 02` (eight ASCII magic bytes followed by
@@ -87,11 +88,37 @@ It supports fragmented and coalesced records and rejects malformed/truncated
 streams. A v1 newline-delimited JSON peer fails the preface check; there is no
 protocol downgrade or plaintext fallback.
 
-Duplicate arbitration and registration occur under one registry lock. The
-connection initiated by the lower UUID is preferred when opposite directions
-compete; a live incumbent wins same-direction ties. Replaced sessions are stopped
-through their Connection handles, and their later cleanup cannot remove the new
-owner's registry entry.
+Duplicate arbitration, the READY registry transition, and ownership publication
+occur in one registry operation under one lock, only after an exact ACTIVE
+UUID/public-key authorization snapshot exists. A candidate cannot displace an
+incumbent while it is merely being validated. The connection initiated by the
+lower authenticated UUID is preferred when opposite directions compete; a live
+incumbent wins same-direction ties. Unverified hello and discovery UUIDs never
+enter this arbitration. Replaced sessions are returned only after the new owner
+is committed, then stopped through their Connection handles; their later cleanup
+cannot remove the new owner's entry.
+
+The authorization boundary uses two capability types. `VerifiedPeerIdentity`
+represents cryptographic proof of a UUID/Ed25519-public-key binding; production
+currently has no constructor or factory for it because the authenticator has not
+been implemented. Only the session-test target can manufacture one. An exact
+ACTIVE TrustStore lookup consumes this proof-bearing identity and produces an
+`AuthorizedPeer` snapshot. Registry publication and application routing consume
+that immutable snapshot rather than accepting caller-supplied UUID strings.
+
+`SessionAuthentication` also owns live authorization invalidation. Final READY
+publication registers the exact UUID, Ed25519 public key, trust revision, and
+permission snapshot; activation revalidates that snapshot so a revocation that
+wins the authorization/activation race fails closed. A background monitor uses
+the TrustStore change token to notice both writes through the daemon's store and
+SQLite commits made by another connection or process, then re-runs the exact
+ACTIVE lookup for each live binding. A changed revision, changed permissions,
+missing binding, revoked status, or persistence error stops the matching session.
+Application records are additionally revalidated immediately before send or
+dispatch, so a privileged operation cannot rely only on the cached snapshot
+during the monitor interval. Setup/control records do not perform this database
+lookup. Cleanup unregisters by session ID, so delayed invalidation of an old
+connection cannot remove a newer DeviceRegistry owner.
 
 Local regression tests are available through `ctest --test-dir build
 --output-on-failure` after a build with `BUILD_TESTING=ON`. They use Unix socket
@@ -207,19 +234,23 @@ concurrently with this version. Complete storage deletion or rollback to a
 UUID-only backup cannot be distinguished from first initialization.
 
 `get_my_device_id()` remains compatible. `get_my_device_identity()` returns the
-same process-wide immutable identity; its `device_id()`, `public_key()`, and
-`private_key()` accessors return const references. Identity objects cannot be
-copied; references must not outlive their owning object. Temporary secret buffers
-and the object's private key are cleared on destruction. Key bytes are not
-logged, transmitted, or exposed by the control API.
+same process-wide immutable identity and exposes only `device_id()` and
+`public_key()`. Identity objects cannot be copied; references must not outlive
+their owning object. There is no production raw-key accessor or generic signing
+oracle. The future authenticator must add a private structured,
+domain-separated signing operation after its transcript format is defined.
+Temporary secret buffers and the object's private key are cleared on destruction.
+Key bytes are not logged, transmitted, or exposed by the control API.
 
 This milestone only provides local key storage: on-disk secrets are protected by
 filesystem permissions, not encryption or an OS keystore, and memory is not
 locked against swapping or crash dumps. Root and processes running as the same
 user remain inside the trust boundary. The filesystem adapter still uses the
 existing Linux/POSIX approach; other platforms will need equivalent persistence.
-Network identity is still the UUID alone, not authentication proof. No protocol,
-pairing, authentication, or encryption changes are included.
+Discovery and hello UUIDs remain unverified metadata, not authentication proof.
+Production sessions deliberately cannot reach READY until the cryptographic
+authenticator exists. No pairing, authentication protocol, or encryption changes
+are included.
 
 `identity_tests` uses temporary directories and fresh child processes to cover
 persistence, migration, permissions, corruption, interrupted writes, and
@@ -229,11 +260,13 @@ concurrent initialization without accessing the user's actual identity.
 
 ## Persistent Trust Storage
 `core/trust/TrustStore` is a standalone storage/model foundation, not part of
-`DeviceRegistry`. The daemon does not open it or consult it yet:
+`DeviceRegistry`. The daemon owns it through `SessionAuthentication`, which is
+shared by live sessions:
 
 - `DiscoveredDevice` holds temporary discovery metadata, including an address.
-- `Connection` owns a live session; `DeviceRegistry` tracks those sessions.
-  Existing sessions are still unauthenticated, including READY sessions.
+- `Connection` owns a live session; `DeviceRegistry` tracks only sessions that
+  crossed the proof-bearing authorization boundary. Until the authenticator is
+  implemented, production sessions cannot become READY.
 - `TrustedDevice` is a persistent local UUID/public-key trust decision. Neither
   discovery nor connection registration can create or reactivate this record.
 
@@ -299,9 +332,12 @@ and open a new connection after fork rather than use an inherited connection.
 
 The small API provides the explicitly administrative `import_device_for_admin`,
 record lookups, trust updates/revocation, state inspection, attempt CRUD, atomic
-pairing finalization, and a read-only configuration snapshot. Raw SQLite handles
-never leave the implementation. Pairing code must not use the administrative
-import path.
+pairing finalization, a read-only configuration snapshot, and a non-authoritative
+change token for live-session monitoring. The token combines an in-process write
+generation with SQLite `data_version`; it is only an invalidation hint, and every
+trust decision still uses `find_active_authorization`. Raw SQLite handles never
+leave the implementation. Pairing code must not use the administrative import
+path.
 All writes use `BEGIN IMMEDIATE` transactions, including permission replacement.
 Device/attempt snapshot reads use read transactions. Updates require an expected
 revision and advance it by exactly one; stale revisions fail without partial
@@ -343,9 +379,12 @@ database together with any WAL; never discard WAL to make an open succeed.
 This is plaintext, permission-protected local storage, not protection against
 root, same-user tampering, backup rollback, or complete deletion of all database
 state. Use a local filesystem with working SQLite locks/fsync, not a network
-filesystem. There is no automatic attempt expiry/cleanup, trust promotion,
-pairing protocol, authentication, or authorization enforcement yet. The stored
-expiry time is metadata until later policy explicitly updates/deletes attempts.
+filesystem. There is no automatic attempt expiry/cleanup, pairing protocol,
+cryptographic authentication, or encrypted transport yet. The connection layer
+nevertheless fails closed: only a proof-bearing identity can request the exact
+ACTIVE authorization lookup, and production cannot create that proof today. The
+stored attempt expiry time is metadata until later policy explicitly
+updates/deletes attempts.
 
 `trust_store_tests` exercises schema upgrades/rollback, constraints, state and
 permission isolation, revisions, concurrency, private files, and WAL recovery

@@ -95,14 +95,22 @@ bool is_control_record(const Packet& packet) {
 
 } // namespace
 
-std::shared_ptr<Connection> Connection::create(int socket_fd, Role role) {
-    auto connection = std::shared_ptr<Connection>(new Connection(socket_fd, role));
+std::shared_ptr<Connection> Connection::create(
+    int socket_fd, Role role, std::shared_ptr<SessionAuthentication> authentication) {
+    if (!authentication) {
+        ::close(socket_fd);
+        throw std::invalid_argument("Connection requires SessionAuthentication");
+    }
+    auto connection = std::shared_ptr<Connection>(
+        new Connection(socket_fd, role, std::move(authentication)));
     ConnectionManager::instance().register_connection(connection);
     return connection;
 }
 
-Connection::Connection(int socket_fd, Role role)
+Connection::Connection(int socket_fd, Role role,
+                       std::shared_ptr<SessionAuthentication> authentication)
     : socket_fd_(socket_fd), session_id_(next_session_id.fetch_add(1)), role_(role),
+      authentication_(std::move(authentication)),
       handshake_deadline_(Clock::now() + HANDSHAKE_TIMEOUT) {}
 
 Connection::~Connection() {
@@ -113,15 +121,108 @@ int Connection::socket_fd() const { return socket_fd_; }
 uint64_t Connection::session_id() const { return session_id_; }
 bool Connection::is_outgoing() const { return role_ == Role::Outgoing; }
 bool Connection::is_stopping() const { return stopping_.load(); }
+bool Connection::is_ready() const { return ready_.load(); }
 
-bool Connection::mark_ready() {
-    if (stopping_.load() || (!ready_.load() && Clock::now() >= handshake_deadline_) ||
-        !device_registry.set_state_for_session(session_id_, DeviceState::READY)) {
+std::optional<AuthorizedPeer> Connection::authorize_verified_identity(
+    const VerifiedPeerIdentity& identity) const {
+    if (!authentication_ || stopping_.load() || ready_.load() ||
+        Clock::now() >= handshake_deadline_) {
+        return std::nullopt;
+    }
+
+    auto authorization = authentication_->authorize_verified_peer(identity);
+    if (!authorization || authorization->device_id() == get_my_device_id()) {
+        return std::nullopt;
+    }
+    return authorization;
+}
+
+bool Connection::complete_authentication_after_verified_identity(
+    const VerifiedPeerIdentity& identity,
+    std::string device_name, std::string device_type) {
+    auto authorization = authorize_verified_identity(identity);
+    if (!authorization) {
         return false;
     }
-    ready_.store(true);
+    return activate_authorized_peer(std::move(*authorization),
+                                    std::move(device_name), std::move(device_type));
+}
+
+bool Connection::activate_authorized_peer(
+    AuthorizedPeer authorization, std::string device_name, std::string device_type) {
+    if (stopping_.load() || ready_.load() || Clock::now() >= handshake_deadline_) {
+        return false;
+    }
+
+    Device device;
+    device.device_id = authorization.device_id();
+    device.device_name = std::move(device_name);
+    device.device_type = std::move(device_type);
+    device.socket_fd = socket_fd_;
+    device.session_id = session_id_;
+    device.connection = shared_from_this();
+    device.preferred_connection =
+        (get_my_device_id() < device.device_id) == is_outgoing();
+    device.state = DeviceState::AUTHENTICATED;
+    device.public_key = authorization.public_key();
+    device.trust_revision = authorization.revision();
+    device.permissions = authorization.permissions();
+
+    DeviceRegistry::RegistrationResult registration;
+    bool live_authorization_registered = false;
+    {
+        std::lock_guard<std::mutex> write_lock(write_mutex_);
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        if (stopping_.load() || ready_.load() || Clock::now() >= handshake_deadline_) {
+            return false;
+        }
+        const std::weak_ptr<Connection> weak_self = weak_from_this();
+        live_authorization_registered = authentication_->register_live_session(
+            session_id_, authorization, [weak_self] {
+                if (const auto connection = weak_self.lock()) {
+                    connection->request_disconnect("live trust authorization invalidated");
+                }
+            });
+        if (!live_authorization_registered) {
+            return false;
+        }
+        try {
+            registration = device_registry.publish_authenticated_device(device, authorization);
+        } catch (...) {
+            authentication_->unregister_live_session(session_id_);
+            throw;
+        }
+        if (!registration.accepted) {
+            authentication_->unregister_live_session(session_id_);
+            return false;
+        }
+        authorized_peer_ = std::move(authorization);
+        ready_.store(true);
+    }
+    if (registration.replaced_device) {
+        if (auto replaced = registration.replaced_device->connection.lock()) {
+            replaced->request_disconnect("authenticated duplicate connection replaced");
+        }
+    }
     return true;
 }
+
+#ifdef GASOLINE_SESSION_TESTING
+bool Connection::complete_authentication_for_test(
+    const VerifiedPeerIdentity& identity,
+    std::string device_name, std::string device_type,
+    std::function<void()> after_authorization) {
+    auto authorization = authorize_verified_identity(identity);
+    if (!authorization) {
+        return false;
+    }
+    if (after_authorization) {
+        after_authorization();
+    }
+    return activate_authorized_peer(std::move(*authorization),
+                                    std::move(device_name), std::move(device_type));
+}
+#endif
 
 ssize_t Connection::send_initial_hello() {
     nlohmann::json pkt;
@@ -135,11 +236,6 @@ ssize_t Connection::send_initial_hello() {
         return -1;
     }
     const ssize_t result = send_packet_locked(pkt);
-    if (result >= 0) {
-        // Publishing this while still holding write_mutex_ guarantees that every
-        // later successful send is ordered after the complete hello record.
-        application_records_enabled_.store(true);
-    }
     return result;
 }
 
@@ -197,6 +293,7 @@ void Connection::start() {
 }
 
 void Connection::request_disconnect(const std::string& reason) {
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
     std::lock_guard<std::mutex> lock(socket_mutex_);
     if (stopping_.exchange(true)) {
         return;
@@ -208,8 +305,14 @@ void Connection::request_disconnect(const std::string& reason) {
 
 ssize_t Connection::send_packet(const nlohmann::json& packet) {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    if (stopping_.load() || !application_records_enabled_.load()) {
+    if (stopping_.load() || !ready_.load() || !authorized_peer_) {
         return -1;
+    }
+    if (!is_control_record(packet)) {
+        if (!authentication_->authorization_is_current(*authorized_peer_)) {
+            request_disconnect("stale authorization before application send");
+            return -1;
+        }
     }
     return send_packet_locked(packet);
 }
@@ -271,6 +374,7 @@ void Connection::finalize_disconnect(const std::string& reason) {
     if (cleaned_up_.exchange(true)) {
         return;
     }
+    authentication_->unregister_live_session(session_id_);
     device_registry.remove_device(session_id_);
     ConnectionManager::instance().unregister_connection(session_id_);
     if (::close(socket_fd_) != 0) {
@@ -286,7 +390,7 @@ bool Connection::handle_record(std::string_view payload) {
         request_disconnect("handshake timeout");
         return false;
     }
-    if (!peer_hello_received_ && payload.size() > MAX_CONTROL_RECORD_SIZE) {
+    if (!ready_.load() && !peer_hello_received_ && payload.size() > MAX_CONTROL_RECORD_SIZE) {
         request_disconnect("oversized setup record");
         return false;
     }
@@ -296,23 +400,34 @@ bool Connection::handle_record(std::string_view payload) {
             request_disconnect("oversized control record");
             return false;
         }
-        if ((pkt.type == "hello" && peer_hello_received_) ||
-            (pkt.type != "hello" && !peer_hello_received_) ||
-            (peer_hello_received_ && pkt.device_id != peer_device_id_)) {
-            request_disconnect("unexpected packet or changed peer identity");
+        if (!ready_.load()) {
+            if (pkt.type != "hello" || peer_hello_received_) {
+                request_disconnect("application/control packet before authentication");
+                return false;
+            }
+            const auto result = PacketRouter::route(pkt, shared_from_this(), nullptr);
+            if (result.action == PacketRouteAction::Disconnect) {
+                request_disconnect("invalid unverified hello");
+                return false;
+            }
+            peer_hello_received_ = true;
+            return !stopping_.load();
+        }
+        if (pkt.type == "hello" || !authorized_peer_) {
+            request_disconnect("unexpected setup packet after authentication");
             return false;
         }
-        const auto result = PacketRouter::route(pkt, shared_from_this());
-        if (result.peer_connection) {
-            result.peer_connection->request_disconnect("duplicate connection replaced");
+        if (!is_control_record(pkt)) {
+            if (!authentication_->authorization_is_current(*authorized_peer_)) {
+                request_disconnect("stale authorization before application receive");
+                return false;
+            }
         }
+        const auto result = PacketRouter::route(
+            pkt, shared_from_this(), &*authorized_peer_);
         if (result.action == PacketRouteAction::Disconnect) {
             request_disconnect("protocol requested disconnect");
             return false;
-        }
-        if (pkt.type == "hello") {
-            peer_device_id_ = pkt.device_id;
-            peer_hello_received_ = true;
         }
     } catch (const std::exception& e) {
         log(std::string("Invalid packet: ") + e.what());

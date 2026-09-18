@@ -65,9 +65,26 @@ constexpr size_t PUBLIC_OFFSET = 56;
 constexpr size_t PRIVATE_OFFSET = 88;
 using Signature = std::array<unsigned char, crypto_sign_BYTES>;
 
+template<class T, class = void>
+struct HasRawPrivateKeyAccessor : std::false_type {};
+
+template<class T>
+struct HasRawPrivateKeyAccessor<T, std::void_t<decltype(std::declval<const T&>().private_key())>>
+    : std::true_type {};
+
+template<class T, class = void>
+struct HasProductionSigningAccessor : std::false_type {};
+
+template<class T>
+struct HasProductionSigningAccessor<
+    T, std::void_t<decltype(std::declval<const T&>().sign_authentication_context(
+           std::declval<std::string_view>()))>> : std::true_type {};
+
 static_assert(!std::is_copy_constructible_v<DeviceIdentity>);
-static_assert(std::is_same_v<decltype(std::declval<const DeviceIdentity&>().private_key()),
-                             const DeviceIdentity::PrivateKey&>);
+static_assert(!HasRawPrivateKeyAccessor<DeviceIdentity>::value,
+              "production identity API exposes raw private-key material");
+static_assert(!HasProductionSigningAccessor<DeviceIdentity>::value,
+              "production identity API exposes arbitrary-byte signing");
 static_assert(std::is_same_v<decltype(gasoline::get_my_device_identity()), const DeviceIdentity&>);
 static_assert(std::is_same_v<decltype(gasoline::get_my_device_id()), std::string>);
 
@@ -135,15 +152,35 @@ std::string hex(const std::array<unsigned char, N>& bytes) {
 }
 
 Signature sign_and_verify(const DeviceIdentity& identity) {
-    constexpr unsigned char message[] = "Gasoline local identity persistence test";
-    Signature signature{};
-    unsigned long long size = 0;
-    require(crypto_sign_detached(signature.data(), &size, message, sizeof(message),
-                                 identity.private_key().data()) == 0 && size == signature.size(),
-            "local signing failed");
-    require(crypto_sign_verify_detached(signature.data(), message, sizeof(message),
+    constexpr std::string_view message = "Gasoline local identity persistence test";
+    const Signature signature = identity.sign_bytes_for_test(message);
+    require(crypto_sign_verify_detached(
+                signature.data(), reinterpret_cast<const unsigned char*>(message.data()), message.size(),
                                         identity.public_key().data()) == 0, "local signature invalid");
     return signature;
+}
+
+bool same_identity(const DeviceIdentity& left, const DeviceIdentity& right) {
+    return left.device_id() == right.device_id() && left.public_key() == right.public_key() &&
+           sign_and_verify(left) == sign_and_verify(right);
+}
+
+bool valid_key_record(const std::string& record, const DeviceIdentity& identity) {
+    if (record.size() != KEY_SIZE ||
+        sodium_memcmp(record.data() + PUBLIC_OFFSET, identity.public_key().data(), 32) != 0) {
+        return false;
+    }
+    std::array<unsigned char, crypto_sign_SEEDBYTES> seed{};
+    std::array<unsigned char, crypto_sign_PUBLICKEYBYTES> derived_public{};
+    std::array<unsigned char, crypto_sign_SECRETKEYBYTES> derived_private{};
+    const auto* stored_private = reinterpret_cast<const unsigned char*>(record.data() + PRIVATE_OFFSET);
+    const bool valid = crypto_sign_ed25519_sk_to_seed(seed.data(), stored_private) == 0 &&
+        crypto_sign_seed_keypair(derived_public.data(), derived_private.data(), seed.data()) == 0 &&
+        sodium_memcmp(derived_public.data(), identity.public_key().data(), derived_public.size()) == 0 &&
+        sodium_memcmp(derived_private.data(), stored_private, derived_private.size()) == 0;
+    sodium_memzero(seed.data(), seed.size());
+    sodium_memzero(derived_private.data(), derived_private.size());
+    return valid;
 }
 
 void wait_success(pid_t child) {
@@ -168,13 +205,10 @@ void creation_and_reload() {
     require(manifest == first.device_id() + "\ned25519-v1\n", "incorrect identity marker");
     require(keys.size() == KEY_SIZE && keys.substr(0, 20) == "GASOLINE-ED25519-V1\n" &&
             keys.substr(20, 36) == first.device_id(), "incorrect key record format/binding");
-    require(sodium_memcmp(keys.data() + PUBLIC_OFFSET, first.public_key().data(), 32) == 0 &&
-            sodium_memcmp(keys.data() + PRIVATE_OFFSET, first.private_key().data(), 64) == 0,
-            "persisted key material differs from API");
+    require(valid_key_record(keys, first), "persisted key material is inconsistent");
     for (int i = 0; i < 4; ++i) {
         const auto loaded = DeviceIdentity::load_or_create(storage.path);
-        require(first.device_id() == loaded.device_id() && first.public_key() == loaded.public_key() &&
-                first.private_key() == loaded.private_key(), "reload changed identity");
+        require(same_identity(first, loaded), "reload changed identity");
     }
     require(read_bytes(storage.path) == manifest && read_bytes(storage.keys()) == keys, "reload rewrote storage");
     sign_and_verify(first);
@@ -232,8 +266,7 @@ void complete_directory_tree_durability() {
         trace.successful.clear();
         const auto loaded = DeviceIdentity::load_or_create(storage.path);
         require_directory_syncs(trace, storage.path.parent_path(), false);
-        require(identity.device_id() == loaded.device_id() && identity.public_key() == loaded.public_key() &&
-                identity.private_key() == loaded.private_key(), "directory sync changed identity");
+        require(same_identity(identity, loaded), "directory sync changed identity");
     }
 }
 
@@ -292,7 +325,7 @@ void legacy_migration() {
     require(migrated.device_id() == LEGACY_UUID, "migration changed existing UUID");
     require(mode(storage.path.parent_path()) == 0700, "legacy directory was not secured");
     const auto loaded = DeviceIdentity::load_or_create(storage.path);
-    require(loaded.private_key() == migrated.private_key(), "migration generated keys twice");
+    require(same_identity(loaded, migrated), "migration generated keys twice");
     fs::remove(storage.keys());
     reject(storage.path, "lost migrated keys");
     require(!fs::exists(storage.keys()), "lost migrated keys were regenerated");
@@ -333,7 +366,7 @@ void corrupt_keys() {
     }
     write_bytes(storage.keys(), original);
     const auto restored = DeviceIdentity::load_or_create(storage.path);
-    require(restored.private_key() == identity.private_key(), "valid backup did not restore identity");
+    require(same_identity(restored, identity), "valid backup did not restore identity");
 }
 
 void corrupt_manifest() {
@@ -452,7 +485,7 @@ void abandoned_lock() {
     }
     wait_success(child);
     const auto loaded = DeviceIdentity::load_or_create(storage.path);
-    require(loaded.private_key() == identity.private_key(), "abandoned lock blocked/changed identity");
+    require(same_identity(loaded, identity), "abandoned lock blocked/changed identity");
 }
 } // namespace
 
@@ -463,9 +496,7 @@ int main(int argc, char** argv) {
             require(identity.device_id() == argv[3] && hex(identity.public_key()) == argv[4] &&
                     hex(sign_and_verify(identity)) == argv[5], "fresh process identity mismatch");
             const auto bytes = read_bytes(std::string(argv[2]) + ".keys");
-            require(bytes.size() == KEY_SIZE &&
-                    sodium_memcmp(bytes.data() + PRIVATE_OFFSET, identity.private_key().data(), 64) == 0,
-                    "fresh process private key mismatch");
+            require(valid_key_record(bytes, identity), "fresh process key record mismatch");
             return 0;
         }
         require(argc == 1, "unexpected test arguments");

@@ -7,6 +7,8 @@
 #include "utils/logger.hpp"
 #include "services/message_service.hpp"
 #include "interface/api_server.hpp"
+#include "auth/session_authentication.hpp"
+#include "trust/trust_store.hpp"
 
 #include <signal.h>
 #include <thread>
@@ -17,8 +19,14 @@ using namespace gasoline;
 int main() {
     signal(SIGPIPE, SIG_IGN); // Prevent crash on broken pipe
 
-    Server server;
-    DiscoveryClient discovery;
+    // Fail closed before accepting connections if identity or trust persistence
+    // cannot be initialized. Authentication is injected into every session.
+    (void)get_my_device_identity();
+    auto trust_store = std::make_shared<TrustStore>();
+    auto authentication = std::make_shared<SessionAuthentication>(trust_store);
+
+    Server server(authentication);
+    DiscoveryClient discovery(authentication);
     DiscoveryService discovery_service;
 
     // Thread 1: TCP Server

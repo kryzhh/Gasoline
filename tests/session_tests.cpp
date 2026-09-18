@@ -1,20 +1,27 @@
 #include "core/networking/connection.hpp"
 #include "core/networking/connection_manager.hpp"
 #include "core/networking/send_packet.hpp"
+#include "core/auth/session_authentication.hpp"
 #include "core/device/device_registry.hpp"
 #include "core/events/event_bus.hpp"
 #include "core/protocol/handlers/hello_handler.hpp"
 #include "core/protocol/v2_framing.hpp"
 #include "services/message_service.hpp"
+#include "core/trust/trust_store.hpp"
 
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <sqlite3.h>
+
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <future>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -38,11 +45,104 @@ constexpr size_t CONTROL_LIMIT = 4096;
 
 static_assert(!std::is_invocable_v<decltype(&gasoline::send_packet), int, const json&>,
               "Sending by file descriptor must not be possible");
+static_assert(!std::is_constructible_v<VerifiedPeerIdentity, TrustUuid, TrustPublicKey>,
+              "ordinary callers can manufacture verified peer identity");
+static_assert(!std::is_constructible_v<AuthorizedPeer, TrustUuid, TrustPublicKey,
+                                       std::string, int64_t, std::vector<std::string>>,
+              "ordinary callers can manufacture authorized peers");
+using AuthorizationMethod = decltype(&SessionAuthentication::authorize_verified_peer);
+static_assert(!std::is_invocable_v<AuthorizationMethod, const SessionAuthentication*,
+                                   const TrustUuid&, const TrustPublicKey&>,
+              "raw UUID/public-key pairs can reach session authorization");
 
 void require(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
+}
+
+struct SessionTestEnvironment {
+    std::filesystem::path root;
+    std::shared_ptr<TrustStore> trust_store;
+    std::shared_ptr<SessionAuthentication> authentication;
+    std::mutex mutex;
+
+    std::filesystem::path database_path() const {
+        return root / "state" / "trust.sqlite3";
+    }
+
+    SessionTestEnvironment() {
+        char pattern[] = "/tmp/gasoline-session-tests-XXXXXX";
+        const char* directory = ::mkdtemp(pattern);
+        require(directory != nullptr, "mkdtemp failed");
+        root = directory;
+        trust_store = std::make_shared<TrustStore>(root / "state" / "trust.sqlite3");
+        authentication = std::make_shared<SessionAuthentication>(trust_store);
+    }
+
+    ~SessionTestEnvironment() {
+        authentication.reset();
+        trust_store.reset();
+        std::error_code ignored;
+        std::filesystem::remove_all(root, ignored);
+    }
+
+    TrustPublicKey trust(const std::string& device_id) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const TrustUuid uuid = trust_uuid_from_string(device_id);
+        TrustPublicKey key{};
+        for (size_t i = 0; i < key.size(); ++i) {
+            key[i] = static_cast<unsigned char>(uuid[i % uuid.size()] ^ (i * 17U + 1U));
+        }
+        if (!trust_store->find_device(uuid)) {
+            TrustedDevice device;
+            device.uuid = uuid;
+            device.public_key = key;
+            device.status = TrustStatus::Active;
+            device.revision = 1;
+            device.local_alias = "Session test peer";
+            device.peer_name = "Session test peer";
+            device.peer_platform = "test";
+            device.pairing_method = "test-fixture";
+            device.paired_at = 1;
+            device.permissions = {"message"};
+            trust_store->import_device_for_admin(device);
+        }
+        return key;
+    }
+
+    TrustedDevice device(const std::string& device_id) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto result = trust_store->find_device(trust_uuid_from_string(device_id));
+        require(result.has_value(), "test trust record is missing");
+        return *result;
+    }
+
+    void update_permissions(const std::string& device_id,
+                            std::vector<std::string> permissions) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto current = trust_store->find_device(trust_uuid_from_string(device_id));
+        require(current.has_value(), "test trust record is missing");
+        const auto expected_revision = current->revision;
+        ++current->revision;
+        current->permissions = std::move(permissions);
+        trust_store->update_device(*current, expected_revision);
+    }
+
+    void revoke(const std::string& device_id) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto current = trust_store->find_device(trust_uuid_from_string(device_id));
+        require(current.has_value(), "test trust record is missing");
+        trust_store->revoke_device(current->uuid, current->revision, 100);
+    }
+};
+
+SessionTestEnvironment test_environment;
+
+VerifiedPeerIdentity verified_identity_for_test(
+    const std::string& device_id, const TrustPublicKey& public_key) {
+    return VerifiedPeerIdentity::for_test(
+        trust_uuid_from_string(device_id), public_key);
 }
 
 template<class Predicate>
@@ -64,6 +164,46 @@ json hello(const std::string& id = PEER_ID) {
     return value;
 }
 
+void proof_bearing_authorization_api() {
+    const auto key = test_environment.trust(PEER_ID);
+    const auto verified = verified_identity_for_test(PEER_ID, key);
+    const auto authorization =
+        test_environment.authentication->authorize_verified_peer(verified);
+    require(authorization && authorization->device_id() == PEER_ID &&
+                authorization->public_key() == key,
+            "proof-bearing identity did not authorize its exact ACTIVE binding");
+
+    auto wrong_key = key;
+    wrong_key[0] ^= 0xff;
+    require(!test_environment.authentication->authorize_verified_peer(
+                verified_identity_for_test(PEER_ID, wrong_key)),
+            "proof-bearing identity bypassed the exact UUID/key trust binding");
+}
+
+void replace_key_through_external_sqlite(const std::filesystem::path& path,
+                                         const TrustUuid& uuid,
+                                         const TrustPublicKey& replacement_key) {
+    sqlite3* database = nullptr;
+    require(sqlite3_open_v2(path.c_str(), &database,
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                            nullptr) == SQLITE_OK,
+            "external SQLite key-change open failed");
+    sqlite3_busy_timeout(database, 5000);
+    sqlite3_stmt* statement = nullptr;
+    const char* sql = "UPDATE trusted_devices SET public_key=?,revision=revision+1 WHERE uuid=?";
+    require(sqlite3_prepare_v2(database, sql, -1, &statement, nullptr) == SQLITE_OK,
+            "external SQLite key-change prepare failed");
+    require(sqlite3_bind_blob(statement, 1, replacement_key.data(),
+                              static_cast<int>(replacement_key.size()), SQLITE_TRANSIENT) == SQLITE_OK &&
+                sqlite3_bind_blob(statement, 2, uuid.data(),
+                                  static_cast<int>(uuid.size()), SQLITE_TRANSIENT) == SQLITE_OK,
+            "external SQLite key-change bind failed");
+    require(sqlite3_step(statement) == SQLITE_DONE && sqlite3_changes(database) == 1,
+            "external SQLite key change failed");
+    sqlite3_finalize(statement);
+    require(sqlite3_close(database) == SQLITE_OK, "external SQLite key-change close failed");
+}
+
 struct Peer {
     int fd = -1;
     std::shared_ptr<Connection> connection;
@@ -83,9 +223,13 @@ struct Peer {
         }
         fd = sockets[1];
         const int buffer_size = 4096;
-        require(::setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size)) == 0,
-                "setsockopt failed");
-        connection = Connection::create(sockets[0], role);
+        const int set_buffer =
+            ::setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+        const int set_buffer_error = errno;
+        require(set_buffer == 0,
+                std::string("setsockopt failed: ") + std::strerror(set_buffer_error) +
+                    " fd=" + std::to_string(sockets[0]));
+        connection = Connection::create(sockets[0], role, test_environment.authentication);
         if (start) {
             connection->start();
             if (negotiate_v2) {
@@ -190,12 +334,10 @@ struct Peer {
     }
 
     void ready(bool use_pong = false, const std::string& id = PEER_ID) {
-        send(hello(id));
-        require(read_packet()["type"] == "ping", "missing handshake ping");
-        send(packet(use_pong ? "pong" : "ping", id));
-        if (!use_pong) {
-            require(read_packet()["type"] == "pong", "missing handshake pong");
-        }
+        const auto key = test_environment.trust(id);
+        require(connection->complete_authentication_for_test(
+                    verified_identity_for_test(id, key), "Local test peer", "test"),
+                "test authorization did not reach READY");
         wait_until([&] {
             for (const auto& device : device_registry.get_devices_copy()) {
                 if (device.session_id == connection->session_id() && device.state == DeviceState::READY) {
@@ -204,6 +346,10 @@ struct Peer {
             }
             return false;
         }, "session did not reach READY");
+        send(packet(use_pong ? "pong" : "ping", id));
+        if (!use_pong) {
+            require(read_packet()["type"] == "pong", "READY ping/pong failed");
+        }
     }
 
     void closed() {
@@ -227,6 +373,14 @@ void normal_handshake_and_messages() {
         std::vector<MessageEvent> events;
         wait_until([&] { events = EventBus::consume_events(); return !events.empty(); }, "message was not delivered");
         require(events.size() == 1 && events[0].device_id == PEER_ID && events[0].text == "from local peer", "wrong message event");
+        auto spoofed = packet("message", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        spoofed["payload"]["text"] = "spoof attempt";
+        peer.send(spoofed);
+        wait_until([&] { events = EventBus::consume_events(); return !events.empty(); },
+                   "spoof-attribution message was not delivered");
+        require(events.size() == 1 && events[0].device_id == PEER_ID &&
+                events[0].text == "spoof attempt",
+                "packet.device_id overrode authenticated event identity");
         MessageService::send_to_device(PEER_ID, "to local peer");
         require(peer.read_packet()["payload"]["text"] == "to local peer", "MessageService send failed");
         MessageService::broadcast_message("local broadcast");
@@ -242,7 +396,6 @@ void repeated_hello_and_unexpected_packets() {
                 peer.ready();
             } else {
                 peer.send(hello());
-                require(peer.read_packet()["type"] == "ping", "missing ping");
             }
             peer.send(hello(change_identity ? "a0000000-0000-4000-8000-000000000000" : PEER_ID));
             peer.closed();
@@ -253,26 +406,24 @@ void repeated_hello_and_unexpected_packets() {
         Peer peer;
         peer.send(packet(type));
         peer.closed();
+        require(!peer.connection->is_ready(),
+                std::string(type) + " made an unauthenticated session READY");
+        require(device_registry.get_devices_copy().empty(),
+                std::string(type) + " registered an unauthenticated session");
     }
-    Peer changed_id;
-    changed_id.ready();
-    changed_id.send(packet("ping", "another-identity"));
-    changed_id.closed();
 }
 
-void messages_do_not_complete_handshake() {
+void application_packets_are_rejected_before_authentication() {
     Peer peer;
     peer.send(hello());
-    require(peer.read_packet()["type"] == "ping", "missing ping");
     EventBus::consume_events();
     auto message = packet("message");
     message["payload"]["text"] = "message after hello";
     peer.send(message);
-    wait_until([] { return !EventBus::consume_events().empty(); }, "existing post-hello message behavior changed");
-    require(device_registry.get_devices_copy().at(0).state == DeviceState::HANDSHAKE_DONE,
-            "message incorrectly completed handshake");
-    peer.send(packet("ping"));
-    require(peer.read_packet()["type"] == "pong", "ping/pong failed after message");
+    peer.closed();
+    require(EventBus::consume_events().empty(), "pre-authentication message reached its handler");
+    require(device_registry.get_devices_copy().empty(),
+            "unverified hello entered DeviceRegistry");
 }
 
 void malformed_hello_rejection() {
@@ -337,13 +488,13 @@ std::string padded_packet(const std::string& type, size_t length) {
 void frame_boundaries() {
     {
         Peer peer;
-        peer.send_preface();
-        const auto greeting = protocol_v2::encode_record(hello().dump());
-        require(peer.write(greeting.substr(0, 1)), "split header send failed");
-        require(peer.write(greeting.substr(1, 8)), "split payload send failed");
-        require(peer.write(greeting.substr(9) + protocol_v2::encode_record(packet("ping").dump())),
+        peer.ready();
+        const auto ping = protocol_v2::encode_record(packet("ping").dump());
+        require(peer.write(ping.substr(0, 1)), "split header send failed");
+        require(peer.write(ping.substr(1, 8)), "split payload send failed");
+        require(peer.write(ping.substr(9) + protocol_v2::encode_record(packet("ping").dump())),
                 "coalesced send failed");
-        require(peer.read_packet()["type"] == "ping", "fragmented hello failed");
+        require(peer.read_packet()["type"] == "pong", "fragmented ping failed");
         require(peer.read_packet()["type"] == "pong", "coalesced ping failed");
         const auto boundary = padded_packet("unknown", FRAME_LIMIT);
         const auto encoded_boundary = protocol_v2::encode_record(boundary);
@@ -380,28 +531,27 @@ void incompatible_v1_and_bad_preface() {
     }
 }
 
-void initial_hello_wins_send_race() {
+void public_send_waits_for_authorized_ready() {
     for (int iteration = 0; iteration < 25; ++iteration) {
         Peer peer(Connection::Role::Incoming, -1, true, false);
         auto racing_send = std::async(std::launch::async, [connection = peer.connection] {
-            const auto deadline = Clock::now() + 2s;
-            const auto message = packet("message");
-            for (;;) {
-                const ssize_t result = connection->send_packet(message);
-                if (result >= 0) {
-                    return result;
-                }
-                require(!connection->is_stopping() && Clock::now() < deadline,
-                        "racing application send never became enabled");
-                std::this_thread::yield();
-            }
+            return connection->send_packet(packet("message"));
         });
         peer.send_preface();
         require(peer.read_packet()["type"] == "hello",
                 "racing application record preceded the initial hello");
+        require(racing_send.get() == -1, "pre-authentication public send succeeded");
+        pollfd descriptor{peer.fd, POLLIN, 0};
+        require(peer.input.empty() && ::poll(&descriptor, 1, 20) == 0,
+                "pre-authentication application bytes reached the wire");
+        const auto key = test_environment.trust(PEER_ID);
+        require(peer.connection->complete_authentication_for_test(
+                    verified_identity_for_test(PEER_ID, key)),
+                "test authorization failed");
+        require(peer.connection->send_packet(packet("message")) > 0,
+                "authorized READY send failed");
         require(peer.read_packet()["type"] == "message",
-                "racing application record was missing after the initial hello");
-        require(racing_send.get() > 0, "racing application send failed");
+                "authorized application record was missing");
     }
 }
 
@@ -507,16 +657,217 @@ void duplicate_ownership() {
     old.closed();
     const auto current_id = preferred.connection->session_id();
     device_registry.remove_device(old.connection->session_id());
-    require(!device_registry.set_state_for_session(old.connection->session_id(), DeviceState::DISCONNECTED), "stale state update succeeded");
     require(device_registry.get_devices_copy().at(0).session_id == current_id, "stale cleanup removed new owner");
     for (auto role : {Connection::Role::Incoming, Connection::Role::Outgoing}) {
         Peer duplicate(role);
         duplicate.send(hello());
+        std::this_thread::sleep_for(20ms);
+        require(!duplicate.connection->is_ready(), "unverified hello reached READY");
+        require(device_registry.get_devices_copy().at(0).session_id == current_id,
+                "unverified hello replaced authenticated ownership");
+        duplicate.connection->request_disconnect("end unverified duplicate test");
         duplicate.closed();
         require(device_registry.get_devices_copy().at(0).session_id == current_id, "duplicate replaced incumbent");
     }
     preferred.send(packet("ping"));
     require(preferred.read_packet()["type"] == "pong", "owner stopped responding");
+}
+
+void cancelled_candidate_preserves_incumbent() {
+    Peer incumbent(Connection::Role::Incoming);
+    incumbent.ready();
+    const auto incumbent_session = incumbent.connection->session_id();
+
+    Peer candidate(Connection::Role::Outgoing);
+    const auto key = test_environment.trust(PEER_ID);
+    const auto verified = verified_identity_for_test(PEER_ID, key);
+    std::promise<void> authorization_complete;
+    auto authorization_complete_future = authorization_complete.get_future();
+    std::promise<void> resume_activation;
+    auto resume_activation_future = resume_activation.get_future().share();
+
+    auto completion = std::async(std::launch::async, [&] {
+        return candidate.connection->complete_authentication_for_test(
+            verified, "Cancelled candidate", "test", [&] {
+                authorization_complete.set_value();
+                resume_activation_future.wait();
+            });
+    });
+
+    require(authorization_complete_future.wait_for(2s) == std::future_status::ready,
+            "candidate did not pause after authorization");
+    auto devices = device_registry.get_devices_copy();
+    require(devices.size() == 1 && devices[0].session_id == incumbent_session &&
+                devices[0].state == DeviceState::READY,
+            "candidate displaced incumbent before final activation");
+
+    candidate.connection->request_disconnect("cancel candidate before activation");
+    resume_activation.set_value();
+    require(completion.wait_for(2s) == std::future_status::ready && !completion.get(),
+            "cancelled candidate reached READY");
+    candidate.closed();
+
+    devices = device_registry.get_devices_copy();
+    require(devices.size() == 1 && devices[0].session_id == incumbent_session &&
+                devices[0].state == DeviceState::READY,
+            "failed candidate removed or replaced incumbent ownership");
+    incumbent.send(packet("ping"));
+    require(incumbent.read_packet()["type"] == "pong",
+            "incumbent was unusable after candidate cancellation");
+}
+
+void ready_session_revocation_is_live() {
+    const std::string id = "f1000000-0000-4000-8000-000000000001";
+    Peer peer;
+    peer.ready(false, id);
+
+    test_environment.revoke(id);
+    wait_until([&] { return peer.connection->is_stopping(); },
+               "revoked READY session retained cached authorization");
+    require(peer.connection->send_packet(packet("message", id)) == -1,
+            "revoked READY session sent application traffic");
+    peer.closed();
+}
+
+void permission_reduction_invalidates_cached_authorization() {
+    const std::string id = "f2000000-0000-4000-8000-000000000002";
+    Peer peer;
+    peer.ready(false, id);
+
+    test_environment.update_permissions(id, {});
+    require(peer.connection->send_packet(packet("message", id)) == -1,
+            "stale message permission was usable after reduction");
+    peer.closed();
+}
+
+void unrelated_revision_change_is_isolated() {
+    const std::string changed_id = "f3000000-0000-4000-8000-000000000003";
+    const std::string unaffected_id = "f4000000-0000-4000-8000-000000000004";
+    Peer changed;
+    changed.ready(false, changed_id);
+    Peer unaffected;
+    unaffected.ready(false, unaffected_id);
+
+    test_environment.update_permissions(changed_id, {"message", "extra"});
+    changed.closed();
+    require(!unaffected.connection->is_stopping(),
+            "unrelated revision change invalidated another peer");
+    require(unaffected.connection->send_packet(packet("message", unaffected_id)) > 0,
+            "unrelated revision change blocked current authorization");
+    require(unaffected.read_packet().at("type") == "message",
+            "unaffected peer did not receive application record");
+}
+
+void exact_key_change_isolation() {
+    const std::string changed_id = "f5000000-0000-4000-8000-000000000005";
+    const std::string unaffected_id = "f6000000-0000-4000-8000-000000000006";
+    Peer changed;
+    changed.ready(false, changed_id);
+    Peer unaffected;
+    unaffected.ready(false, unaffected_id);
+
+    auto replacement_key = test_environment.trust(changed_id);
+    replacement_key[0] ^= 0x5a;
+    replace_key_through_external_sqlite(
+        test_environment.database_path(), trust_uuid_from_string(changed_id), replacement_key);
+
+    changed.closed();
+    require(!unaffected.connection->is_stopping(),
+            "another peer's public-key change invalidated this session");
+    require(unaffected.connection->send_packet(packet("message", unaffected_id)) > 0,
+            "another peer's key change blocked application traffic");
+    require(unaffected.read_packet().at("type") == "message",
+            "key-change isolation lost the unaffected application record");
+}
+
+void revocation_racing_final_activation_fails_closed() {
+    const std::string id = "f7000000-0000-4000-8000-000000000007";
+    Peer candidate;
+    const auto key = test_environment.trust(id);
+    const auto verified = verified_identity_for_test(id, key);
+    std::promise<void> authorization_complete;
+    auto authorization_complete_future = authorization_complete.get_future();
+    std::promise<void> resume_activation;
+    auto resume_activation_future = resume_activation.get_future().share();
+
+    auto completion = std::async(std::launch::async, [&] {
+        return candidate.connection->complete_authentication_for_test(
+            verified, "Revoked candidate", "test", [&] {
+                authorization_complete.set_value();
+                resume_activation_future.wait();
+            });
+    });
+    require(authorization_complete_future.wait_for(2s) == std::future_status::ready,
+            "candidate did not pause after its initial authorization");
+
+    auto external_store = std::make_shared<TrustStore>(test_environment.database_path());
+    const auto current = external_store->find_device(trust_uuid_from_string(id));
+    require(current.has_value(), "external store could not find race fixture");
+    external_store->revoke_device(current->uuid, current->revision, 101);
+    resume_activation.set_value();
+    require(completion.wait_for(2s) == std::future_status::ready && !completion.get(),
+            "revocation racing activation reached READY");
+    require(!candidate.connection->is_ready(), "revoked race candidate published READY");
+    candidate.connection->request_disconnect("end authorization/revocation race test");
+    candidate.closed();
+}
+
+void cross_process_revocation_is_detected() {
+    const std::string id = "f8000000-0000-4000-8000-000000000008";
+    Peer peer;
+    peer.ready(false, id);
+    const auto current = test_environment.device(id);
+    const auto path = test_environment.database_path().string();
+    const auto revision = std::to_string(current.revision);
+
+    const pid_t child = ::fork();
+    require(child >= 0, "fork for cross-process revocation failed");
+    if (child == 0) {
+        ::execl("/proc/self/exe", "session_tests", "--revoke-trust",
+                path.c_str(), id.c_str(), revision.c_str(), nullptr);
+        ::_exit(127);
+    }
+    int status = 0;
+    require(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+            "cross-process TrustStore writer failed");
+
+    peer.closed();
+}
+
+void invalidated_cleanup_preserves_newer_owner() {
+    const std::string id = "f9000000-0000-4000-8000-000000000009";
+    Peer incumbent(Connection::Role::Incoming);
+    incumbent.ready(false, id);
+    const auto incumbent_session = incumbent.connection->session_id();
+
+    auto external_store = std::make_shared<TrustStore>(test_environment.database_path());
+    auto current = external_store->find_device(trust_uuid_from_string(id));
+    require(current.has_value(), "external store could not find replacement fixture");
+    const auto expected_revision = current->revision;
+    ++current->revision;
+    current->permissions = {"message", "replacement"};
+    external_store->update_device(*current, expected_revision);
+    wait_until([&] { return incumbent.connection->is_stopping(); },
+               "incumbent was not invalidated before replacement");
+    incumbent.closed();
+
+    Peer replacement(Connection::Role::Outgoing);
+    const auto key = test_environment.trust(id);
+    require(replacement.connection->complete_authentication_for_test(
+                verified_identity_for_test(id, key), "Replacement", "test"),
+            "new authorization revision did not publish replacement owner");
+    const auto replacement_session = replacement.connection->session_id();
+    // Model a delayed/idempotent cleanup callback after the newer owner is
+    // published. Registry removal must remain session-scoped, not UUID-scoped.
+    device_registry.remove_device(incumbent_session);
+
+    const auto devices = device_registry.get_devices_copy();
+    require(devices.size() == 1 && devices[0].session_id == replacement_session,
+            "invalidated incumbent cleanup removed the newer owner");
+    require(replacement.connection->send_packet(packet("message", id)) > 0,
+            "newer owner was unusable after invalidated cleanup");
+    require(replacement.read_packet().at("type") == "message",
+            "newer owner application record was not delivered");
 }
 
 void descriptor_reuse_and_lifetime() {
@@ -545,22 +896,24 @@ void simultaneous_duplicate_registration() {
     for (int iteration = 0; iteration < 10; ++iteration) {
         Peer incoming(Connection::Role::Incoming);
         Peer outgoing(Connection::Role::Outgoing);
+        const auto key = test_environment.trust(PEER_ID);
+        const auto verified = verified_identity_for_test(PEER_ID, key);
         std::atomic<bool> go{false};
         auto first = std::async(std::launch::async, [&] {
             while (!go.load()) { std::this_thread::yield(); }
-            incoming.send(hello());
+            return incoming.connection->complete_authentication_for_test(verified);
         });
         auto second = std::async(std::launch::async, [&] {
             while (!go.load()) { std::this_thread::yield(); }
-            outgoing.send(hello());
+            return outgoing.connection->complete_authentication_for_test(verified);
         });
         go.store(true);
-        first.get();
-        second.get();
-        require(outgoing.read_packet()["type"] == "ping", "preferred connection did not win");
-        outgoing.send(packet("ping"));
-        require(outgoing.read_packet()["type"] == "pong", "preferred connection handshake failed");
+        (void)first.get();
+        require(second.get(), "preferred authenticated connection was rejected");
+        incoming.connection->request_disconnect("losing duplicate candidate");
         incoming.closed();
+        outgoing.send(packet("ping"));
+        require(outgoing.read_packet()["type"] == "pong", "preferred connection was not READY");
         const auto devices = device_registry.get_devices_copy();
         require(devices.size() == 1 && devices[0].session_id == outgoing.connection->session_id(), "concurrent registration lost ownership");
     }
@@ -676,7 +1029,6 @@ void handshake_deadlines() {
     const auto hello_begin = Clock::now();
     Peer hello_only;
     hello_only.send(hello());
-    require(hello_only.read_packet()["type"] == "ping", "missing ping");
     auto hello_expiry = std::async(std::launch::async, [&] { verify_expiry(hello_only, hello_begin, false, "hello-only"); });
     const auto trickle_begin = Clock::now();
     Peer trickle(Connection::Role::Incoming, -1, true, false);
@@ -706,20 +1058,39 @@ void handshake_deadlines() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 5 && std::string(argv[1]) == "--revoke-trust") {
+        try {
+            TrustStore store(argv[2]);
+            store.revoke_device(trust_uuid_from_string(argv[3]), std::stoll(argv[4]), 102);
+            return 0;
+        } catch (const std::exception& e) {
+            std::cerr << "cross-process helper failed: " << e.what() << std::endl;
+            return 2;
+        }
+    }
     try {
         const std::pair<const char*, void(*)()> tests[] = {
+            {"proof-bearing identity gates authorization", proof_bearing_authorization_api},
             {"hello, ping/pong, READY and bidirectional messages", normal_handshake_and_messages},
             {"repeated hello and unexpected identity/packet rejection", repeated_hello_and_unexpected_packets},
-            {"post-hello messages preserve the incomplete handshake state", messages_do_not_complete_handshake},
+            {"application messages are rejected before authentication", application_packets_are_rejected_before_authentication},
             {"malformed hello validation and controlled rejection", malformed_hello_rejection},
             {"fragmented, coalesced and boundary-sized v2 records", frame_boundaries},
             {"protocol v1 and malformed v2 preface rejection", incompatible_v1_and_bad_preface},
-            {"initial hello wins a concurrent application-send race", initial_hello_wins_send_race},
+            {"public sends remain disabled until authorized READY", public_send_waits_for_authorized_ready},
             {"connection EOF truncation and zero-length rejection", connection_eof_and_zero_length_records},
             {"setup and control record limits", control_record_limits},
             {"bounded outgoing serialization and atomic frame rejection", bounded_outgoing_serialization},
             {"UUID duplicate ownership and stale registry operations", duplicate_ownership},
+            {"cancelled candidate preserves incumbent ownership", cancelled_candidate_preserves_incumbent},
+            {"READY revocation invalidates and closes the live session", ready_session_revocation_is_live},
+            {"permission reduction invalidates cached authorization", permission_reduction_invalidates_cached_authorization},
+            {"unrelated trust revision changes remain isolated", unrelated_revision_change_is_isolated},
+            {"exact public-key changes remain isolated", exact_key_change_isolation},
+            {"revocation racing final activation fails closed", revocation_racing_final_activation_fails_closed},
+            {"cross-process TrustStore revocation is detected", cross_process_revocation_is_detected},
+            {"invalidated cleanup preserves a newer owner", invalidated_cleanup_preserves_newer_owner},
             {"simultaneous opposite-direction registration", simultaneous_duplicate_registration},
             {"descriptor reuse, stale handles and no raw fallback", descriptor_reuse_and_lifetime},
             {"worker strong ownership and unstarted cleanup", worker_owns_connection},

@@ -5,12 +5,12 @@
 
 namespace gasoline {
 
-ClientHandler::ClientHandler(int socket_fd) { 
-    this->socket_fd = socket_fd; // Stores the socket inside the object
-}
+ClientHandler::ClientHandler(int socket_fd, std::shared_ptr<SessionAuthentication> authentication)
+    : socket_fd(socket_fd), authentication_(std::move(authentication)) {}
 
 void ClientHandler::handle() {
-    auto connection = Connection::create(socket_fd, Connection::Role::Incoming);
+    auto connection = Connection::create(
+        socket_fd, Connection::Role::Incoming, authentication_);
     connection->start();
 }
 

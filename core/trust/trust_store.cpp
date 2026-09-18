@@ -299,6 +299,7 @@ struct TrustStore::Impl {
     std::unique_ptr<Fd> directory;
     Database db;
     mutable std::mutex mutex;
+    uint64_t local_generation = 0;
 
     void check_files() const {
         const auto name = path.filename().string();
@@ -415,6 +416,7 @@ void TrustStore::import_device_for_admin(const TrustedDevice& device) {
     insert.run();
     write_permissions(db, device.uuid, device.permissions, false);
     transaction.commit();
+    ++impl_->local_generation;
 }
 
 std::optional<TrustedDevice> TrustStore::find_device(const TrustUuid& uuid) const {
@@ -464,6 +466,13 @@ std::optional<ActivePeerAuthorization> TrustStore::find_active_authorization(
     return result;
 }
 
+TrustStore::ChangeToken TrustStore::change_token() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->check_files();
+    return {impl_->local_generation,
+            pragma_integer(impl_->db.get(), "PRAGMA data_version")};
+}
+
 void TrustStore::update_device(const TrustedDevice& device, int64_t expected_revision) {
     next_revision(device.revision, expected_revision);
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -482,6 +491,7 @@ void TrustStore::update_device(const TrustedDevice& device, int64_t expected_rev
     clear.run();
     write_permissions(db, device.uuid, device.permissions, false);
     transaction.commit();
+    ++impl_->local_generation;
 }
 
 void TrustStore::revoke_device(const TrustUuid& uuid, int64_t expected_revision, int64_t revoked_at) {
@@ -501,6 +511,7 @@ void TrustStore::revoke_device(const TrustUuid& uuid, int64_t expected_revision,
     clear.bind(1, uuid);
     clear.run();
     transaction.commit();
+    ++impl_->local_generation;
 }
 
 TrustState TrustStore::state(const TrustUuid& uuid) const {
@@ -686,6 +697,7 @@ void TrustStore::finalize_pairing(const TrustUuid& attempt_id, int64_t expected_
     consume.run();
     changed_one(db);
     transaction.commit();
+    ++impl_->local_generation;
 }
 
 TrustStore::Configuration TrustStore::configuration() const {

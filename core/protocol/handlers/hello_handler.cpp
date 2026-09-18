@@ -1,13 +1,7 @@
 #include "hello_handler.hpp"
 
-#include "../../device/device_registry.hpp"
-#include "../../device/device.hpp"
 #include "../../networking/connection.hpp"
 #include "../../utils/logger.hpp"
-#include "../../utils/device_id.hpp"
-#include "../../networking/send_packet.hpp"
-
-#include <optional>
 
 namespace gasoline {
 
@@ -29,51 +23,15 @@ HelloHandler::Result HelloHandler::handle(const Packet& pkt, const std::shared_p
         return result;
     }
 
-    std::string my_id = get_my_device_id();
-    std::string peer_id = pkt.device_id;
-
-    log("My ID: " + my_id + " | Peer ID: " + peer_id);
-
-    if (peer_id.empty() || my_id.empty()) {
+    if (pkt.device_id.empty()) {
         log("Missing device_id in hello packet");
         result.action = Action::DisconnectCurrent;
         return result;
     }
-
-    if (my_id == peer_id) {
-        log("Peer is self; rejecting connection");
-        result.action = Action::DisconnectCurrent;
-        return result;
-    }
-
-    Device device;
-    device.device_id = peer_id;
-    device.device_name = device_name->get<std::string>();
-    device.device_type = device_type->get<std::string>();
-    device.socket_fd = connection->socket_fd();
-    device.session_id = connection->session_id();
-    device.connection = connection;
-    device.preferred_connection = (my_id < peer_id) == connection->is_outgoing();
-    device.state = DeviceState::HANDSHAKE_DONE;
-
-    const auto registration = device_registry.add_device(device);
-    if (!registration.accepted) {
-        log("Duplicate connection rejected by UUID ownership rule");
-        result.action = Action::DisconnectCurrent;
-        return result;
-    }
-
-    if (registration.replaced_device) {
-        result.action = Action::DisconnectPeer;
-        result.peer_connection = registration.replaced_device->connection.lock();
-    }
-
-    nlohmann::json ping;
-    ping["type"] = "ping";
-    ping["device_id"] = my_id;
-    send_packet(connection, ping);
-
-    log("Device registered: " + device.device_id);
+    // Compatibility-only setup metadata. It is deliberately not registered,
+    // deduplicated, or treated as an authenticated identity.
+    log("Received unverified hello metadata for session " +
+        std::to_string(connection->session_id()));
     return result;
 }
 

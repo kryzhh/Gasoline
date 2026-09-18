@@ -12,6 +12,7 @@
 namespace gasoline {
 
 class Connection;
+class AuthorizedPeer;
 
 enum class PacketRouteAction {
     Continue,
@@ -27,7 +28,12 @@ struct PacketRouteResult {
 class PacketRouter {
 
 public:
-    static PacketRouteResult route(const Packet& pkt, const std::shared_ptr<Connection>& connection);
+    // authenticated_peer is null only for the temporary unverified hello.
+    // Application handlers receive the immutable authorization capability and
+    // never accept Packet::device_id or a caller-supplied identity string.
+    static PacketRouteResult route(const Packet& pkt,
+                                   const std::shared_ptr<Connection>& connection,
+                                   const AuthorizedPeer* authenticated_peer);
 
 };
 

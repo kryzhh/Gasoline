@@ -318,6 +318,18 @@ DeviceIdentity DeviceIdentity::load_or_create(const std::filesystem::path& ident
 
 const std::string& DeviceIdentity::device_id() const { return device_id_; }
 const DeviceIdentity::PublicKey& DeviceIdentity::public_key() const { return public_key_; }
-const DeviceIdentity::PrivateKey& DeviceIdentity::private_key() const { return private_key_; }
+#ifdef GASOLINE_IDENTITY_TESTING
+DeviceIdentity::Signature DeviceIdentity::sign_bytes_for_test(std::string_view bytes) const {
+    Signature signature{};
+    unsigned long long signature_size = 0;
+    if (crypto_sign_detached(signature.data(), &signature_size,
+                             reinterpret_cast<const unsigned char*>(bytes.data()),
+                             static_cast<unsigned long long>(bytes.size()),
+                             private_key_.data()) != 0 || signature_size != signature.size()) {
+        throw make_error("Ed25519 test signing failed");
+    }
+    return signature;
+}
+#endif
 
 } // namespace gasoline

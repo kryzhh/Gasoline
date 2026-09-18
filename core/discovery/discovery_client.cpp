@@ -37,11 +37,12 @@ bool is_valid_uuid(const std::string& value) {
 
 } // namespace
 
-DiscoveryClient::DiscoveryClient()
-    : DiscoveryClient(create_platform_discovery_browser()) {}
+DiscoveryClient::DiscoveryClient(std::shared_ptr<SessionAuthentication> authentication)
+    : DiscoveryClient(std::move(authentication), create_platform_discovery_browser()) {}
 
-DiscoveryClient::DiscoveryClient(std::unique_ptr<IDiscoveryBrowser> browser)
-    : browser_(std::move(browser)) {}
+DiscoveryClient::DiscoveryClient(std::shared_ptr<SessionAuthentication> authentication,
+                                 std::unique_ptr<IDiscoveryBrowser> browser)
+    : browser_(std::move(browser)), authentication_(std::move(authentication)) {}
 
 DiscoveryClient::~DiscoveryClient() {
     stop();
@@ -99,9 +100,10 @@ void DiscoveryClient::on_device_discovered(const DiscoveredDevice& device) {
     log("Discovered new device: " + device.device_id + " at " + device.ip_address + ":" + std::to_string(device.port));
 
     // 4. Connect asynchronously to avoid blocking the discovery callback
-    std::thread([this, device_id = device.device_id, ip = device.ip_address, port = device.port]() {
+    std::thread([this, device_id = device.device_id, ip = device.ip_address,
+                 port = device.port, authentication = authentication_]() {
         log("Attempting connection to: " + ip + ":" + std::to_string(port));
-        connect_to_device(ip, port);
+        connect_to_device(ip, port, authentication);
 
         // Allow time for handshake to complete or connect to fail
         std::this_thread::sleep_for(std::chrono::seconds(2));
