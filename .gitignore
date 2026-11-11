@@ -114,3 +114,5 @@ local.properties
 *.gcno
 *.gcda
 *.gcov
+config.bat
+node_modules
