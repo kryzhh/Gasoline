@@ -1,54 +1,38 @@
 #include "hello_handler.hpp"
 
-#include "../../device/device_registry.hpp"
-#include "../../device/device.hpp"
+#include "../../networking/connection.hpp"
 #include "../../utils/logger.hpp"
-#include "../../utils/device_id.hpp"
-#include "../../networking/send_packet.hpp"
-
-#include <unistd.h>
 
 namespace gasoline {
 
-void HelloHandler::handle(const Packet& pkt, int socket_fd) {
+HelloHandler::Result HelloHandler::handle(const Packet& pkt, const std::shared_ptr<Connection>& connection) {
 
-    std::string my_id = get_my_device_id();
-    std::string peer_id = pkt.device_id;
+    Result result;
 
-    log("My ID: " + my_id + " | Peer ID: " + peer_id);
-
-    // Connection Ownership rule
-    try {
-        auto my_num = std::stoull(my_id);
-        auto peer_num = std::stoull(peer_id);
-
-        if (my_num > peer_num) {
-            log("Closing connection (peer should initiate)");
-
-            close(socket_fd);
-            device_registry.remove_device(socket_fd);
-            return;
-        }
+    if (pkt.type != "hello" || !pkt.payload.is_object()) {
+        log("Invalid hello type or payload");
+        result.action = Action::DisconnectCurrent;
+        return result;
     }
-    catch (...) {
-        log("Invalid device_id format");
+    const auto device_name = pkt.payload.find("device_name");
+    const auto device_type = pkt.payload.find("device_type");
+    if (device_name == pkt.payload.end() || !device_name->is_string() ||
+        device_type == pkt.payload.end() || !device_type->is_string()) {
+        log("Hello device_name and device_type must be present and strings");
+        result.action = Action::DisconnectCurrent;
+        return result;
     }
 
-    Device device;
-
-    device.device_id = peer_id;
-    device.device_name = pkt.payload["device_name"];
-    device.device_type = pkt.payload["device_type"];
-    device.socket_fd = socket_fd;
-    device.state = DeviceState::HANDSHAKE_DONE;
-    device_registry.add_device(device);
-
-    nlohmann::json ping;
-    ping["type"] = "ping";
-    ping["device_id"] = my_id;
-    send_packet(socket_fd, ping);
-
-    log("Device registered: " + device.device_id);
+    if (pkt.device_id.empty()) {
+        log("Missing device_id in hello packet");
+        result.action = Action::DisconnectCurrent;
+        return result;
+    }
+    // Compatibility-only setup metadata. It is deliberately not registered,
+    // deduplicated, or treated as an authenticated identity.
+    log("Received unverified hello metadata for session " +
+        std::to_string(connection->session_id()));
+    return result;
 }
 
 }

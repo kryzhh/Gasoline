@@ -1,5 +1,6 @@
 #pragma once
 #include "../packet.hpp"
+#include <memory>
 
 // Implementing Packet router 
 /*
@@ -9,14 +10,30 @@
 */
 
 namespace gasoline {
+
+class Connection;
+class AuthorizedPeer;
+
+enum class PacketRouteAction {
+    Continue,
+    Disconnect,
+    DisconnectPeer
+};
+
+struct PacketRouteResult {
+    PacketRouteAction action = PacketRouteAction::Continue;
+    std::shared_ptr<Connection> peer_connection;
+};
+
 class PacketRouter {
 
 public:
-    static void route(const Packet& pkt, int socket_fd);
-
-private:
-    static void handle_hello(const Packet& pkt, int socket_fd);
-    static void handle_ping(const Packet& pkt, int socket_fd);
+    // authenticated_peer is null only for the temporary unverified hello.
+    // Application handlers receive the immutable authorization capability and
+    // never accept Packet::device_id or a caller-supplied identity string.
+    static PacketRouteResult route(const Packet& pkt,
+                                   const std::shared_ptr<Connection>& connection,
+                                   const AuthorizedPeer* authenticated_peer);
 
 };
 

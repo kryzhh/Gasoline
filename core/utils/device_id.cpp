@@ -1,21 +1,16 @@
 #include "device_id.hpp"
 
-#include <unistd.h>
-#include <functional>
+#include "../identity/device_identity.hpp"
 
 namespace gasoline {
 
-#include <unistd.h>
+const DeviceIdentity& get_my_device_identity() {
+    static const DeviceIdentity identity = DeviceIdentity::load_or_create();
+    return identity;
+}
 
 std::string get_my_device_id() {
-    char hostname[256];
-    gethostname(hostname, sizeof(hostname));
-
-    std::string base = std::string(hostname) + "_" + std::to_string(getpid());
-
-    size_t hash = std::hash<std::string>{}(base);
-    return std::to_string(hash);
-
+    return get_my_device_identity().device_id();
 }
 
 }

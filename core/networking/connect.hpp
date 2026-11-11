@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <string>
 
 /*
@@ -8,6 +9,9 @@
 
 namespace gasoline {
 
-void connect_to_device(const std::string& ip, int port);
+class SessionAuthentication;
+
+void connect_to_device(const std::string& ip, int port,
+                       std::shared_ptr<SessionAuthentication> authentication);
 
 }

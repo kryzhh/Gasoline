@@ -33,8 +33,9 @@ void MessageService::send_to_device(const std::string& device_id, const std::str
     for (const auto& device : devices) {
         if (device.device_id != device_id)
             continue;
-        if (device.socket_fd <= 0) {
-            log("Cannot send to invalid socket for device: " + device_id);
+        const auto connection = device.connection.lock();
+        if (!connection) {
+            log("Session unavailable for device: " + device_id);
             return;
         }
         if (device.state != DeviceState::READY) {
@@ -42,7 +43,7 @@ void MessageService::send_to_device(const std::string& device_id, const std::str
             return;
         }
 
-        const ssize_t sent = send_packet(device.socket_fd, pkt);
+        const ssize_t sent = send_packet(connection, pkt);
         if (sent < 0) {
             log("Failed to send message to: " + device.device_id);
         }
@@ -62,7 +63,8 @@ void MessageService::broadcast_message(const std::string& text) {
     const auto devices = device_registry.get_devices_copy();
 
     for (const auto& device : devices) {
-        if (device.socket_fd <= 0)
+        const auto connection = device.connection.lock();
+        if (!connection)
             continue;
         if (device.state != DeviceState::READY)
             continue;
@@ -70,7 +72,7 @@ void MessageService::broadcast_message(const std::string& text) {
             continue;
 
         log("Sending to device: " + device.device_id);
-        const ssize_t sent = send_packet(device.socket_fd, pkt);
+        const ssize_t sent = send_packet(connection, pkt);
         if (sent < 0) {
             log("Failed to send message to: " + device.device_id);
         }

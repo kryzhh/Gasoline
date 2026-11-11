@@ -1,11 +1,24 @@
 #pragma once
 
-// Hello packet handler, basically registers device.
+// Temporary compatibility validator for unverified hello metadata.
 #include "../packet.hpp"
+#include <memory>
 namespace gasoline {
+class Connection;
 class HelloHandler {
 public:
-    static void handle(const Packet& pkt, int socket_fd);
+    enum class Action {
+        Continue,
+        DisconnectCurrent,
+        DisconnectPeer
+    };
+
+    struct Result {
+        Action action = Action::Continue;
+        std::shared_ptr<Connection> peer_connection;
+    };
+
+    static Result handle(const Packet& pkt, const std::shared_ptr<Connection>& connection);
 };
 
 }

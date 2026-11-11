@@ -27,8 +27,8 @@ out/
 
 # Executables generated during development
 
-gasoline
-gasoline.exe
+/gasoline
+/gasoline.exe
 
 # =========================
 
@@ -67,8 +67,6 @@ desktop.ini
 # =========================
 
 # VSCode
-
-.vscode/
 
 # JetBrains (CLion, Android Studio, IntelliJ)
 

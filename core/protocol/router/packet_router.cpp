@@ -1,11 +1,9 @@
 #include "packet_router.hpp"
 #include "../../device/device_registry.hpp"
-#include "../../device/device.hpp"
+#include "../../networking/connection.hpp"
 #include "../../utils/logger.hpp"
 #include "../../networking/send_packet.hpp"
 #include "../../utils/packet_monitor.hpp"
-
-#include <sys/socket.h>
 
 // Handlers
 #include "../handlers/hello_handler.hpp"
@@ -14,47 +12,44 @@
 
 namespace gasoline {
 
-void PacketRouter::route(const Packet& pkt, int socket_fd) {
-    log_rx(pkt.device_id, pkt.type);
+PacketRouteResult PacketRouter::route(const Packet& pkt,
+                                      const std::shared_ptr<Connection>& connection,
+                                      const AuthorizedPeer* authenticated_peer) {
+    PacketRouteResult result;
+    log_rx(authenticated_peer == nullptr ? std::to_string(connection->session_id()) :
+                                          authenticated_peer->device_id(),
+           pkt.type);
     log("Routing packet type: " + pkt.type);
     if (pkt.type == "hello") {
-        HelloHandler::handle(pkt, socket_fd);
-        return;
+        const auto hello_result = HelloHandler::handle(pkt, connection);
+        if (hello_result.action == HelloHandler::Action::DisconnectCurrent) {
+            result.action = PacketRouteAction::Disconnect;
+            return result;
+        }
+        if (hello_result.action == HelloHandler::Action::DisconnectPeer) {
+            result.action = PacketRouteAction::DisconnectPeer;
+            result.peer_connection = hello_result.peer_connection;
+            return result;
+        }
+        return result;
     }
     if (pkt.type == "ping") {
-        device_registry.set_state_for_socket(socket_fd, DeviceState::READY);
-        PingHandler::handle(pkt, socket_fd);
-        return;
+        PingHandler::handle(pkt, connection);
+        return result;
     }
     if (pkt.type == "pong") {
-        device_registry.set_state_for_socket(socket_fd, DeviceState::READY);
-        log("Connection stabilized; device marked READY");
-        return;
+        return result;
     }
     if (pkt.type == "message") {
-        MessageHandler::handle(pkt, socket_fd);
-        return;
+        if (authenticated_peer == nullptr) {
+            result.action = PacketRouteAction::Disconnect;
+            return result;
+        }
+        MessageHandler::handle(pkt, *authenticated_peer);
+        return result;
     }
-    else log("Unknown packet type: " + pkt.type);
+    log("Unknown packet type: " + pkt.type);
+    return result;
 }
 
-void PacketRouter::handle_hello(const Packet& pkt, int socket_fd) {
-    Device device;
-
-    device.device_id = pkt.device_id;
-    device.device_name = pkt.payload["device_name"];
-    device.device_type = pkt.payload["device_type"];
-    device.socket_fd = socket_fd;
-    device_registry.add_device(device);
-
-    device_registry.list_devices();
-}
-
-void PacketRouter::handle_ping(const Packet& pkt, int socket_fd) {
-    nlohmann::json response;
-    response["type"] = "pong";
-    send_packet(socket_fd, response);
-    log("Pong sent");
-}
-
-}
+} // namespace gasoline

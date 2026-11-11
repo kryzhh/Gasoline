@@ -1,12 +1,14 @@
 // Remember to enjoy the light before it's gone
-#include "../core/networking/server.hpp"
+#include "networking/server.hpp"
 #include <gasoline/discovery_service.hpp>
-#include "../core/discovery/discovery_client.hpp"
-#include "../core/utils/device_id.hpp"
-#include "../core/device/device_registry.hpp"
-#include "../core/utils/logger.hpp"
-#include "../services/message_service.hpp"
-#include "../interface/api_server.hpp"
+#include "discovery/discovery_client.hpp"
+#include "utils/device_id.hpp"
+#include "device/device_registry.hpp"
+#include "utils/logger.hpp"
+#include "services/message_service.hpp"
+#include "interface/api_server.hpp"
+#include "auth/session_authentication.hpp"
+#include "trust/trust_store.hpp"
 
 #include <signal.h>
 #include <thread>
@@ -17,8 +19,14 @@ using namespace gasoline;
 int main() {
     signal(SIGPIPE, SIG_IGN); // Prevent crash on broken pipe
 
-    Server server;
-    DiscoveryClient discovery;
+    // Fail closed before accepting connections if identity or trust persistence
+    // cannot be initialized. Authentication is injected into every session.
+    (void)get_my_device_identity();
+    auto trust_store = std::make_shared<TrustStore>();
+    auto authentication = std::make_shared<SessionAuthentication>(trust_store);
+
+    Server server(authentication);
+    DiscoveryClient discovery(authentication);
     DiscoveryService discovery_service;
 
     // Thread 1: TCP Server

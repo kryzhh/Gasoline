@@ -1,8 +1,6 @@
 #include "connect.hpp"
 #include "../utils/logger.hpp"
-#include "../protocol/packet.hpp"
-#include "../../include/gasoline/config.hpp"
-#include "../utils/device_id.hpp"
+#include "connection.hpp"
 
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -10,7 +8,8 @@
 
 namespace gasoline {
 
-void connect_to_device(const std::string& ip, int port) {
+void connect_to_device(const std::string& ip, int port,
+                       std::shared_ptr<SessionAuthentication> authentication) {
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -39,21 +38,9 @@ void connect_to_device(const std::string& ip, int port) {
 
     log("Connected to device");
 
-    // Send hello packet
-    Packet pkt;
-    pkt.type = "hello";
-    pkt.device_id = get_my_device_id();
-    pkt.payload["device_name"] = "Gasoline";
-    pkt.payload["device_type"] = "linux";
-
-    std::string data = serialize_packet(pkt);
-
-    send(sock, data.c_str(), data.size(), 0);
-
-    log("Hello packet sent");
-
-    // For now: close after sending
-    // close(sock);
+    auto connection = Connection::create(
+        sock, Connection::Role::Outgoing, std::move(authentication));
+    connection->start();
 }
 
 }
